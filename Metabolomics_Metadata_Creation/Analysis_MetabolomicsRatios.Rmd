@@ -1,0 +1,332 @@
+---
+title: "Analysis_NAMS"
+author: "Friederike Gutmann"
+date: "r Sys.Date()"
+output: html_document
+---
+
+# Description
+
+This file enables one to run a statistical analysis of the differences between the two time points. No filtering or correction of the original data can be performed.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("Functions_Metabolites.R", local = knitr::knit_global())
+source("Plots_Metabolites.R", local = knitr::knit_global())
+source("Packages_Metabolites.R", local = knitr::knit_global())
+```
+
+# Data
+
+## Load metabolomics data
+Load filtered and corrected metabolomics data (this script is only for stats!). Name relevant columns in the result file in `relevant_columns_in_resultfile`. c("Sample.Identification", "Batch", "Compound") are definitely needed. One can add "Sample.Type" for example for the last part of the analysis when comparing Choose which metric, so area or concentration etc. should be used in `metric`. Use the same spelling as in the data.frame! Also, choose which `matrix` should be considered, stool or serum? Set `comp.name` to the name you want to give (or that has been given to) the compound column. If SCFA should be loaded, set `SCFA` to `T`. The variable *metabolites* should include all metabolites that already passed QC and should now be considered for statistical analysis. The *result_file* should have the columns given in `relevant_columns_in_resultfile` and the metabolites (so it's a wide format).
+```{r Metabolomics data, echo = FALSE}
+relevant_columns_in_resultfile <- c("Sample.Identification", "Batch.SCFA", "Batch.Trp", "Sample.Type", "Compound")
+metric <- "Area.NormISTD"
+area.name <- "Area.NormISTD"
+matrix <- "Serum" # Can be Stool or Serum
+comp.name <- "Compound"
+
+if (matrix == "Serum") {
+  if(metric == "Concentration") {
+    result_file <- read_rds(here("Results","Metabolomics", "Serum", "NAMS_Serum_Concentration_data.RDS"))
+  } else {
+    result_file <- read_rds(here("Results","Metabolomics", "Serum", "NAMS_Serum_AreaNormISTD_data.RDS"))
+  }
+} else if (matrix == "Stool") {
+  
+  if(metric == "Concentration") {
+    result_file <- read_rds(here("Results","Metabolomics", "Stool", "NAMS_Stool_Concentration_data.RDS"))
+  } else {
+      result_file <- read_rds(here("Results","Metabolomics", "Stool", "NAMS_Stool_AreaNormISTD_data.RDS"))
+  }
+}
+
+result_file_both <- merge(read_rds(here("Results","Metabolomics", "Serum", "NAMS_Serum_AreaNormISTD_data.RDS")) %>% filter(Sample.Type == "Sample") %>% dplyr::select(-c(Sample.Type, Batch.SCFA)) %>% rename_with(~ paste0(., "_Serum"), -Sample.Identification), read_rds(here("Results","Metabolomics", "Stool", "NAMS_Stool_AreaNormISTD_data.RDS"))  %>% filter(Sample.Type == "Sample") %>% dplyr::select(-c(Sample.Type, Batch.SCFA)) %>% rename_with(~ paste0(., "_Stool"), -Sample.Identification), by = "Sample.Identification")
+```
+
+
+## Read metabolite groups
+```{r metabolite groups, echo = FALSE}
+scfas <- c("Acetic_acid", "Hydroxy_methyl_butyric_acid", "Propanoic_acid", "Butyric_acid", "Isobutyric_acid", "X2_Methyl_butyric_acid", "Isovaleric_acid", "Valeric_acid", "Hexanoic_acid")
+Kbs <- c("X3_Hydroxy_butyric_acid", "Acetoacetic_acid", "Acetone")
+Kms <- c("X2_aminophenol","X2_oxoadipic","X3_hydroxyanthranilate","X3_hydroxykynurenine","X3_methoxyanthranilate","anthranilate","formylanthranilate","formylkynurenine","kynurenic", "Kynurenine", "picolinic", "quinolinic","xanthurenic")
+Ids <- c("X3_indoleacetamide","X3_indoleacetonitril","X5_hydroxyindoleacetate","X5_methoxyindoleacetate","indole","indole_3_carboxaldehyde","indole_3_carboxylic","indole_3_ethanol","Indole_3_methyl_acetate","indole_3_propionic", "indolelactate", "indoxylsulfate", "indole_acetic_acid", "TMA", "TMAO")
+Sms <- c("X5_hydroxytryptophan","X5_methoxytryptamine","X6_hydroxymelatonin","acetylserotonin","melatonin", "methyltryptamine", "serotonin", "tryptamin")
+Trps <- c(Kms,Ids,Sms, "tryptophan")
+```
+
+
+## Load merging data file
+This is the file that defines and matches all the sample IDs used throughout the files. Set `meta.merge` to the ID used for each patient - this must be identical in the metabolites and the metadata file. The resulting file *individualsID* should have the columns `meta.merge`, Visit, Group, and Sample.Identification.
+```{r load merging data, echo = FALSE}
+meta.merge <- "PatientID"
+filter_outlier_samples = F
+
+individualsID <- read.csv(here("Samples", "SampleIDs_PerProtocol_V1V3.csv")) %>%
+  mutate(Sample.Identification = Sample.Number) %>%
+  select(-Sample.Number) %>%
+  mutate(Group = recode_factor(Group, `1`="Control", `2`="Ketogenic Diet", `3`="Fasting Diet"))
+
+if(filter_outlier_samples){
+  outlier_IDs <- individualsID %>%
+    filter(Sample.Identification %in% outlier) %>%
+    pull(PatientID)
+}
+```
+
+
+## Load metadata file
+Indicate which variables are factor variables in `factor.vars` and which variables can be deleted in `irrelevant.vars`. Only individuals with an ID in `individualsID` are retained.
+```{r load meta data, echo = FALSE} 
+factor.vars <- c("PatientID", "Group", "scrn_ethnicity.factor", "info_gender.factor", "dropout_prot_reason")
+irrelevant.vars <- c()
+
+# Read in metadata
+mdata <- read.csv(here("Metadata", "NAMS_Metadata_for_analysis_allDiffs.csv"), header = TRUE, dec = ",") %>%
+  select(-"X.1", -all_of(irrelevant.vars)) %>%
+  mutate(across(all_of(factor.vars), ~ as.factor(.))) %>%
+  mutate_if(is.character, as.numeric)
+
+
+visit_diffs_stool <- read.csv(here("Results","Metabolomics", "Stool", "Area_NAMS_Stool_percentDiffs.csv"), header = TRUE)
+visit_diffs_serum <- read.csv(here("Results","Metabolomics", "Serum", "Area_NAMS_Serum_percentDiffs.csv"), header = TRUE)
+
+# Calculate Ketosis state
+if(matrix == "Serum" & metric == "Concentration") {
+  mdata <- mdata %>%
+    mutate(Ketosis = as.factor(ifelse(PatientID %in% ketosis.IDs, "Ketotic", "NonKetotic")))
+}
+
+# Use only IDs in metadata file that are also in the samples file
+#mdata <- subset(mdata, mdata[,meta.merge] %in% individualsID[,meta.merge])
+
+# Collect meta variable names
+mdata.names <- names(mdata)[!names(mdata) == meta.merge]
+
+# 
+mdata.vars <- mdata[mdata.names]
+```
+
+
+## Define colors
+One can define a palette here. The variable `group_palette` is used later in the script. 
+```{r colours, echo = FALSE} 
+safe_colorblind_palette <- c("#88CCEE", "#CC6677", "#DDCC77", "#117733", "#332288", "#AA4499", 
+                             "#44AA99", "#999933", "#882255", "#661100", "#6699CC", "#888888")
+
+group_palette <- c("#117733", "#661100", "#332288")
+```
+
+
+
+
+# Analysis
+
+## Extract Differences between visits
+
+The QCs are thrown out at this stage. If the sample taken at one of the visits has an NA value, the whole metabolite becomes NA, because no difference can be calculated. Set the group name, i.e. the name of the column containing the variable by which the  in `group.name`. Define which kind of file you want to use to calculate the differences in `results` (this depends on previous setting when loading the metabolomics data). One can also save this data here to run other analyses with it. Outliers are filtered using MADs calculated per diet group if `filter_outliers` is set to `TRUE`.
+```{r visit differences, echo = FALSE}
+group.name <- "Group"
+results <- result_file
+filter_outliers <- F
+
+result_file_incl_metadata <- merge(results, individualsID, by = "Sample.Identification")
+
+if(filter_outlier_samples){
+  result_file_incl_metadata <- result_file_incl_metadata %>% filter(!PatientID %in% outlier_IDs)
+}
+
+visit_diffs <- result_file_incl_metadata %>%
+  group_by(PatientID) %>%
+  #summarise(across(all_of(metabolites), ~ (.x[Visit == "V3"]/.x[Visit == "V0"]-1)*100))
+  summarise(across(all_of(metabolites), ~ (.x[Visit == "V3"]-.x[Visit == "V0"])))
+
+if (filter_outliers){
+    visit_diffs <- merge(visit_diffs, individualsID %>% filter(Visit == "V0") %>% select(PatientID, Group), by = "PatientID") %>%
+      #as.data.frame(visit_diffs) %>%
+      #ungroup() %>%
+      group_by(Group) %>%
+    mutate(across(all_of(metabolites),~ {
+      # Calculate MAD
+      mad_value <- mad(.x, na.rm = TRUE)
+      
+      # Calculate median
+      median_value <- median(.x, na.rm = TRUE)
+      
+      # Identify outliers
+      outliers <- abs(.x - median_value) > 3 * mad_value
+      
+      # Replace outliers with NA
+      replace(.x, outliers, NA)
+    })) %>%
+      ungroup() %>%
+      select(-Group)
+}
+
+visit_diffs_long <- visit_diffs %>%
+  gather(!!comp.name, !!metric, -all_of(meta.merge))
+
+visit_diffs_w_groups <- merge(as.data.frame(visit_diffs), individualsID[,c(group.name, meta.merge)], by = meta.merge) %>%
+  #mutate(Group = ifelse(Group == "Ketogenic Diet", "Ketogenic Diet", "Other")) %>%
+  select(where(~!all(is.na(.x)))) %>%
+  unique()
+
+visit_diffs_w_groups_long <- visit_diffs_w_groups %>%
+  gather(!!comp.name, !!metric, -c(all_of(meta.merge), Group))
+
+#visit_diffs_w_groups
+#write_csv(visit_diffs_w_groups, here("Results","Metabolomics", "Serum", "Area_NAMS_Serum_percentDiffs.csv"))
+#write_csv(visit_diffs_w_groups, here("Results","Metabolomics", "Serum", "Area_NAMS_Serum_absoluteDiffs.csv"))
+```
+
+### Plot differences
+The differences in concentrations per time point in the different groups are plotted here.
+```{r plot visit differences, echo = FALSE}
+boxplot <- visit_diffs_w_groups %>%
+  #filter(Group == "Fasting Diet") %>%
+  dplyr::select(c(PatientID, Group), any_of(c(Trps)), -TMAO) %>%
+  gather(!!comp.name, Diff, -c(meta.merge, group.name)) %>%
+  mutate(Diffscale = log2(Diff)) %>%
+  ggplot(aes_string(x = comp.name, color = group.name)) +
+  geom_boxplot(aes(y = Diff), position=position_dodge(.9), outlier.shape = NA) +
+  geom_point(aes(y = Diff), position=position_dodge(.9), size = 2, alpha = 0.5) +
+  scale_color_manual(values = group_palette) + 
+  theme_classic() +
+  #ylab("V3 to V0 concentration change [%]") +
+  ylab("V3 to V0 AUC change") +
+  #scale_y_break(c(5000, 7000), scales = 0.4) +
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size = 12),
+        axis.text.y = element_text(size = 12)) +
+  theme(legend.position = "bottom")
+
+boxplot
+#ggsave(here("Results", "Plots", "Metabolomics", "SCFA", "Serum", "AA_3HMB_absoluteChange.pdf"), boxplot,  width = 3)
+
+```
+
+### Determine significance
+This is more exploratory and was not used in the publication. Set the limit for the p.value you want to allow at `p.limit` and the adjustment method for p-value adjustment in `adjust.method` (as used in base::p.adjust(), which includes "none" if you want to look at the unadjusted results).
+
+```{r significance of visit differences, echo = FALSE}
+p.limit <- 0.05
+adjust.method <- "fdr"
+plot.text.size <- 7
+cor.lim <- 0.06
+
+result_list <- calc.metabolite.correlations(visit_diffs_long, mdata, adjust.method)
+
+if(matrix == "Serum") {
+  sig.metabolites_results <- result_list$adjusted %>% filter(Group < 0.1) %>% select_if(~any(. < 0.1))
+} else if(matrix == "Stool") {
+  sig.metabolites_results <- result_list$p.Value %>% filter(Group < 0.1) %>% select_if(~any(. < 0.05))
+}
+
+
+plot_p.value <- make.correlation.plot_p.Value(sig.metabolites_results, filter = F, text_size = plot.text.size)
+plot_cor.estimate <- make.correlation.plot_cor.estimate(result_list$cor.estimate %>% select(Group), cor.lim, text_size = plot.text.size, filter = F, scale_limits = c(-0.2, 0.2))
+
+plot_p.value
+#ggsave(here("Results", "Plots", "Metabolomics", "Combined", "Metabolite_correlation_pvals_AreaDiffs_stool_p01.pdf"), plot_p.value)
+plot_cor.estimate
+#ggsave(here("Results", "Plots", "Metabolomics", "Combined", "Group_effectSize_stool.pdf"), plot_cor.estimate)
+
+lapply(metabolites,function(x) {dunn_test(data = visit_diffs_w_groups %>% gather(Compound, Concentration, -c(PatientID, Group)) %>% filter(Compound == x), formula = Concentration ~ Group)})
+
+result_list$adjusted %>% select(starts_with("mri_pbvc"))
+
+result_list$cor.estimate
+
+result_list$cor.estimate %>% filter(Group >= 0.06)
+```
+
+
+#### Metabolite abundance per condition
+
+If there is a difference in metabolite abundance in males & females, for example, the sex should be included as fixed (or random?) variable in the model.
+
+```{r Boxplots, echo = FALSE, warning=FALSE}
+metavariable = "mri_pbvc.v3_arm_1"
+metabolite_var = "Acetoacetic_acid"
+
+make_variable_boxplot(visit_diffs_w_groups_long, mdata, metavariable, metabolite_var, plot.kind = "by.variable")
+
+#ggsave(here("Results", "Plots", "Metabolomics", "Trp", "Serum", "Trp_per_BrainVolChange_V3.pdf"), make_variable_boxplot(visit_diffs_w_groups_long, mdata, metavariable, metabolite_var, plot.kind = "by.variable"), width = 7) # Width 14 fits wide ppt slides, useful for by.metabolite
+```
+
+## Potential IDO activation
+
+The QCs are thrown out at this stage. If the sample taken at one of the visits has an NA value, the whole metabolite becomes NA, because no difference can be calculated. Set the group name, i.e. the name of the column containing the variable by which the  in `group.name`. Define which kind of file you want to use to calculate the differences in `results`. 
+```{r visit differences, echo = FALSE}
+group.name <- "Group"
+results <- result_file
+
+result_file_incl_metadata <- merge(results, individualsID, by = "Sample.Identification")
+
+visit_diffs_KynToTrp <- result_file_incl_metadata %>%
+  mutate(KynToTrp = Kynurenine/tryptophan) %>%
+  group_by(PatientID) %>%
+  summarise(across(KynToTrp, ~ (.x[Visit == "V3"]/.x[Visit == "V0"]-1)*100))
+  #summarise(across(all_of(metabolites), ~ diff(.x)))
+
+group_diffs_V0 <- result_file_incl_metadata %>%
+  mutate(KynToTrp = Kynurenine/tryptophan) %>%
+  filter(Visit == "V0")
+
+group_diffs_V3 <- result_file_incl_metadata %>%
+  mutate(KynToTrp = Kynurenine/tryptophan) %>%
+  filter(Visit == "V3")
+
+dunn_test(group_diffs_V3, KynToTrp ~ Group)
+
+visit_diffs_w_groups <- merge(as.data.frame(visit_diffs_KynToTrp), mdata[,c(group.name, meta.merge)], by = meta.merge) %>%
+  select(where(~!all(is.na(.x)))) %>%
+  mutate(Group = recode_factor(Group, `1`="Control", `2`="Ketogenic Diet", `3`="Fasting Diet")) %>%
+  unique()
+
+visit_diffs_w_groups %>%
+  gather(!!comp.name, Diff, -c(meta.merge, group.name)) %>%
+  mutate(Diffscale = log2(Diff)) %>%
+  ggplot(aes_string(x = comp.name, color = group.name)) +
+  geom_boxplot(aes(y = Diff), position=position_dodge(.9), outlier.shape = NA) +
+  geom_point(aes(y = Diff), position=position_dodge(.9), outlier.size = 0.5, size = 1, alpha = 0.5) +
+  scale_color_manual(values = group_palette) +
+  theme_classic() +
+  ylab("V3 to V0 concentration change [%]") +
+  ylim(-100,400)+
+  theme(axis.text.x = element_text(angle = 45, hjust=1, size = 12),
+        axis.text.y = element_text(size = 12))
+
+dunn_test(visit_diffs_w_groups, KynToTrp ~ Group)
+summary(aov(visit_diffs_w_groups$KynToTrp ~ visit_diffs_w_groups$Group))[[1]][["Pr(>F)"]][1]
+#write_rds(visit_diffs_w_groups, here("Results","Metabolomics", "Serum", "Tryptophan", "Run2", "Concentrations_NAMS_Serum_percentDiffs.RDS"))
+```
+
+
+
+## Serum-Stool correlation
+
+```{r serum-stool correlation, echo = FALSE}
+result_file_both_samples_w_group <- merge(as.data.frame(result_file_both), individualsID[,c(group.name, "Sample.Identification")], by = "Sample.Identification") %>%
+  mutate(Group = recode_factor(Group, `1`="Control", `2`="Ketogenic Diet", `3`="Fasting Diet"))
+
+stool_serum_corplot <- result_file_both_samples_w_group %>%
+  ggplot(aes(tryptophan_Serum,tryptophan_Stool, color = Group)) +
+  geom_point() +
+  geom_smooth(method='lm', se = FALSE) +
+  #xlim(0,500)+
+  scale_color_manual(values = group_palette) +
+  theme_classic() +
+  theme(axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12))
+
+
+cor.test(result_file_both_samples_w_group$tryptophan_Serum, result_file_both_samples_w_group$tryptophan_Stool, method = "pearson")$p.value
+
+stool_serum_corplot
+#ggsave(here("Results", "Plots", "Metabolomics", "Trp", "stool_serum_corplot.pdf"), stool_serum_corplot)
+```
+
+
+
+

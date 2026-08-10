@@ -1,0 +1,438 @@
+---
+title: "Quality_Control_Metabolites"
+author: "Friederike Gutmann"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Description
+
+This script allows for a metabolomics quality control, including batch correction based on qc medians and dimensionality reduction analysis.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("Functions_Metabolites.R", local = knitr::knit_global())
+source("Plots_Metabolites.R", local = knitr::knit_global())
+source("Packages_Metabolites.R", local = knitr::knit_global())
+```
+
+# Data
+
+## Load metabolite data
+Choose which `matrix` should be considered, stool or serum? This should be the large table produced by metaproc: it should have Sample.Identification as first column, then  Compound, Area, Background, Batch, Sample.Type etc. Set `analysis` to SCFA or Tryptophan.
+
+```{r Metabolomics data, echo = FALSE}
+matrix = "Serum"
+analysis = "Tryptophan"
+
+if (matrix == "Serum") {
+  
+  if (analysis == "SCFA") {
+    metaproc_result_raw <- read.csv(here("Results","Metabolomics", "Serum", "SCFA", "NAMS_SCFA_Serum_long_040823.csv"), header = T, sep = ",") %>%
+      select(-X) %>%
+      mutate(Sample.Type = ifelse(Sample.Type == "Pooled QC", "Pooled QC 1", Sample.Type))
+  } else if (analysis == "Tryptophan") {
+    metaproc_result_raw <- read.csv(here("Results","Metabolomics", "Serum", "Tryptophan", "Run2", "NAMS_Trp_Serum_long_310523.csv"), header = T, sep = ",")
+    }
+  
+} else if (matrix == "Stool") {
+  
+  if (analysis == "SCFA") {
+    metaproc_result_raw <- read.csv(here("Results","Metabolomics", "Stool", "NAMS_SCFA_Stool_long_080823.csv"), header = T, sep = ",") %>%
+      select(-X)
+  } else if (analysis == "Tryptophan") {
+    metaproc_result_raw <- read.csv(here("Results","Metabolomics", "Stool", "NAMS_Trp_Stool_long_310523.csv"), header = T, sep = ",")
+  }
+  
+}
+ 
+metaproc_result <- metaproc_result_raw %>%
+  mutate(Compound = str_replace(Compound, "\\s", "_")) %>%
+  mutate(Compound = ifelse(grepl("^\\d", Compound), paste("X", Compound, sep = ""), Compound)) %>%
+  mutate(across(Sample.Type, ~ ifelse(grepl("QC_H", Sample.Identification), "QC High", .))) %>%
+  mutate(across(Sample.Type, ~ ifelse(grepl("QC_L", Sample.Identification), "QC Low", .))) %>%
+  mutate(ISTD = str_replace(ISTD, "\\s", "_")) %>%
+  mutate(Sample.Identification = ifelse(Sample.Type == "Pooled QC 1", paste("QC", Sample.Identification, sep = "_"), Sample.Identification)) %>%
+  filter(!grepl("Standby", Sample.Identification)) %>%
+  mutate(Area.NormISTD = replace(Area.NormISTD, is.infinite(Area.NormISTD), NA))
+
+metaproc_result %>%
+  filter(is.na(Area.NormISTD)) %>%
+  group_by(Compound) %>%
+  summarize(across(Status_Limits,~ sum(. %in% c("Valid", "< LLOQ (Blank)"))))
+```
+
+
+## Individuals
+Load a file with the appointment of statistical groups to each sampleID. This should produce a data frame `individuals` with the columns Visit, Group and Sample.Identification. Importantly, the third column, aka the column depicting the sampleIDs, should have the same name as in the previously loaded file `metaproc.result`. The tibble *samples_per_group* just sums up the number of samples gathered per group (as these are two time points, divide by 2 and you get the number of patients in that group).
+
+```{r Individuals data, echo = FALSE}
+individuals <- read.csv(here("Samples", "SampleIDs_PerProtocol_V1V3.csv")) %>%
+  mutate(Sample.Identification = Sample.Number) %>%
+  select(-Sample.Number, -PatientID) %>%
+  mutate(Group = as.factor(Group))
+
+samples_per_group <- individuals %>%
+  group_by(Group) %>%
+  summarise(n = n())
+```
+
+
+# Linearity filter
+
+## Prepare linearity filter
+All concentrations or areas from a metabolite M are retained, if it is quantifiable or at least between LOD and LLOQ in >= `linearity_threshold` % of samples in all statistical groups.
+
+```{r Filter metaproc, echo = FALSE}
+linearity_threshold <- 0.6
+
+# Calculate the number of samples that need a value e.g. > LOD in each group according to the threshold
+samples_per_group_threshold <- samples_per_group %>%
+  mutate(CalPercent = round(linearity_threshold*n))
+
+# Calculate the number of > LOD occurances per group and compound
+linearity_results <- merge(metaproc_result %>% select(Sample.Identification, Compound, Status_Limits), individuals[,c("Sample.Identification", "Group")], by =  "Sample.Identification") %>%
+  group_by(Compound, Group) %>%
+  summarize(across(Status_Limits,~ sum(. %in% c("Valid", "< LLOQ (Blank)", "< LLOQ (S/N)", "< LLOQ (Blank);< LLOQ (S/N)")))) %>%
+  ungroup()
+
+# Remove compounds with less occurrences of > LOD than necessary given the threshold. Then calculate how often a compound is retained and filter out those which do not have enough values > LOD in all 3 groups.
+# By removing the summarise and last filter step, one can decide to filter based on the occurance in one statistical group
+valid_compounds <- unique(merge(samples_per_group_threshold[,c("Group", "CalPercent")], linearity_results, by = "Group") %>%
+  mutate(Valid = ifelse(Status_Limits >= CalPercent, 1, 0)) %>%
+  filter(Valid == 1) %>%
+  group_by(Compound) %>%
+  summarise(across(Valid, ~sum(.))) %>%
+  filter(Valid == 3) %>%
+  pull(Compound))
+
+merge(samples_per_group_threshold[,c("Group", "CalPercent")], linearity_results, by = "Group") %>%
+  spread(Compound, Status_Limits)
+
+valid_compounds
+
+setdiff(unique(metaproc_result$Compound), valid_compounds)
+```
+It can make sense to run a seperate analysis with Propanoic Acid and Butyric Acid in Serum, so setting the threshold very low.
+
+
+
+## Filter the data based on linearity
+Give the column, e.g. Concentration, that should be used for further analyses in `metric`. Only compounds which adhere to the filter defined above are retained. The result is a file with the columns Sample.Identification, Compound (only in long format!), Sequence.Position, Batch, Sample.Type and the name of the column given in `metric` (only in long format! Otherwise, the rest of the columns are the retained compounds). 
+
+```{r Metabolomics data, echo = FALSE}
+exclude_comp <- c("tryptophan_C13", "d3_Acetic_acid", "d5_propanoic_acid", "d7_Butyric_acid", "d9_Valeric_acid", "d11_Hexanoic_acid")
+metric <- "Area.NormISTD"
+
+result_file_long <- metaproc_result %>%
+  filter(Compound %in% valid_compounds) %>%
+  filter(!Compound %in% exclude_comp) %>%
+  select(c(Sample.Identification, Compound, Sequence.Position, Batch, Sample.Type, all_of(metric)))
+
+result_file <- result_file_long %>%
+    spread(Compound, !!metric) #%>%
+ # mutate(across(-c(Sample.Identification, Sequence.Position, Batch, Sample.Type), ~ . + 1000))
+```
+
+
+# Check out missing values
+
+```{r Missing Values, echo = FALSE}
+result_file %>%
+  filter(Sample.Type == "Sample") %>%
+  #filter(if_any(everything(), is.na)) %>%
+  summarise_all(~ sum(is.na(.)))
+```
+
+
+# Correction
+
+## Use QCRLSC for inter batch correction
+
+### Check wether batch correction is needed
+
+Is batch correction needed? We assume non-normality by default. The data displayed is scaled. `res_table` provides the p-value of the multiple comparison test, the adjusted p-value and all posthoc test results.
+
+```{r BC check, echo = FALSE}
+result_file %>%
+  filter(grepl("^[1-9]", Sample.Identification)) %>%
+  mutate(across(any_of(unique(result_file_long$Compound)), scales::rescale)) %>%
+  gather(Compound, Area, -c(Sample.Identification, Sequence.Position, Batch, Sample.Type)) %>%
+  ggplot(aes(x=Compound, y = Area, color=Batch)) +
+  geom_boxplot(outlier.size = 0.5, position = position_dodge(0.9)) +
+  geom_point(position=position_jitterdodge(jitter.width = 0.1, dodge.width = 0.9),alpha=0.3) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 7))
+
+res_table <- batch_diff_sig(result_file %>% filter(grepl("Sample", Sample.Type)), unique(result_file_long$Compound))
+
+res_table %>%
+  filter(BH < 0.05)
+```
+
+
+### Perform Batch correction
+
+Batch correction based on qc medians as written in metaproc. *result_file.norm* is the normalized *result_file*, so it has the same columns. Give the name of the QC that should be used for normalization in `qc_sample_type.name` as it is written in the Sample.Type column, e.g. "Pooled QC 1". Choose the RSD QCRLSC uses to disregard compounds with a high technical variability in `QCRLSC_CV`.
+
+```{r Batch correction, echo = FALSE}
+output_column.name <- "Conc.Corr"
+qc_sample_type.name <- "Pooled QC 1" # "Pooled QC 1" or "Reference QC"
+QCRLSC_CV = 30
+
+write_csv(result_file %>%
+            mutate(Sequence.Position = ifelse(Sample.Identification == "QC_B2_Pool7_1", 120, Sequence.Position)) %>%
+            mutate(Sequence.Position = ifelse(Sample.Identification == "QC_B3_Pool5_1", 89, Sequence.Position)) %>%
+    arrange(Batch, Sequence.Position) %>%
+    filter(Sample.Type == "Sample" | Sample.Type == qc_sample_type.name) %>%
+    select(-c(Sequence.Position, Batch, Sample.Type)) %>%
+    mutate(Sample.Identification = paste("X", Sample.Identification, sep = "")) %>%
+    pivot_longer(cols = -Sample.Identification) %>%
+    pivot_wider(names_from = Sample.Identification, values_from = value), here("temp", "temp_feature.csv"))
+
+write_csv(result_file %>%
+            mutate(Sequence.Position = ifelse(Sample.Identification == "QC_B2_Pool7_1", 120, Sequence.Position)) %>%
+            mutate(Sequence.Position = ifelse(Sample.Identification == "QC_B3_Pool5_1", 89, Sequence.Position)) %>%
+    arrange(Batch, Sequence.Position) %>%
+    filter(Sample.Type == "Sample" | Sample.Type == qc_sample_type.name) %>%
+    mutate(order = row_number()) %>%
+    mutate(Batch = as.integer(case_when(Batch == "Batch1" ~ 1, Batch == "Batch2" ~ 2, Batch == "Batch3" ~ 3))) %>%
+    mutate(Sample.Type = ifelse(Sample.Type == qc_sample_type.name, NA, ifelse(Sample.Type == "Sample", 1, ifelse(Sample.Type == "Calibration Standard", 2, ifelse(Sample.Type == "Background", 3, ifelse(Sample.Type == "Pooled QC 2", 4, ifelse(Sample.Type == "Pooled QC 3", 5, 6))))))) %>%
+    mutate(Sample.Identification = paste("X", Sample.Identification, sep = "")) %>%
+    rename(batch = Batch) %>%
+    rename(class = Sample.Type) %>%
+    rename(sample = Sample.Identification) %>%
+    select(sample, batch, class, order), here("temp", "temp_sample.csv"))
+  
+shiftCor(samPeno = here("temp", "temp_sample.csv"), samFile = here("temp", "temp_feature.csv"), MLmethod = "QCRLSC", QCspan = 0.75, Frule = 0, imputeM = "min", coCV = QCRLSC_CV)
+  
+result_file_norm <- merge(read.csv(here("Scripts", "statTarget", "shiftCor", "After_shiftCor", "shift_all_cor.csv")) %>%
+    mutate(Sample.Identification = gsub("X", "", sample)) %>%
+    select(-c(class, sample)),
+    result_file %>% select(Sample.Identification, Sequence.Position, Batch, Sample.Type),
+    by = "Sample.Identification")
+
+result_file_norm_long <- result_file_norm %>%
+    gather(Compound,!!output_column.name, -c(Sample.Identification, Sequence.Position, Batch, Sample.Type))
+
+result_file_norm
+result_file 
+```
+
+
+### Check if batch correction worked
+
+```{r BC check, echo = FALSE}
+result_file_norm %>%
+  filter(grepl("^[1-9]", Sample.Identification)) %>%
+  mutate(across(any_of(unique(result_file_long$Compound)), scales::rescale)) %>%
+  gather(Compound, Area, -c(Sample.Identification, Sequence.Position, Batch, Sample.Type)) %>%
+  ggplot(aes(x=Compound, y = Area, color=Batch)) +
+  geom_boxplot(outlier.size = 0.5, position = position_dodge(0.9)) +
+  geom_point(position=position_jitterdodge(jitter.width = 0.1, dodge.width = 0.9),alpha=0.3) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 7))
+
+res_table_norm <- batch_diff_sig(result_file_norm %>% filter(grepl("Sample", Sample.Type)), unique(result_file_norm_long$Compound))
+
+res_table_norm %>%
+  filter(BH < 0.05)
+```
+
+
+# Look at QCs and samples for each metabolite
+This plot should show the measured numbers for the sample type defined as regular expression in `Sample_regex` as given in the column Sample.Type coloured by batch so as to see the dispersion of measurements. Indicate whether the batch corrected or raw file (in case no batch correction is needed) should be used for further analysis in `Batch_correction`. 
+
+```{r QC check, echo = FALSE}
+Sample_regex <- "Sample"
+Batch_correction <- T
+
+if(Batch_correction){
+  result_file_basis <- result_file_norm
+} else {
+  result_file_basis <- result_file
+  output_column.name <- metric
+}
+
+p <- result_file_basis %>%
+  gather(Compound, !!output_column.name, -c(Sample.Identification, Sequence.Position, Batch, Sample.Type)) %>%
+  #filter(grepl("^[1-9", Sample.Identification)) %>%
+  filter(grepl(Sample_regex, Sample.Type)) %>%
+  filter(!grepl("Standby", Sample.Identification)) %>%
+  ggplot(aes(x = Sequence.Position, fill = Batch, color = Batch)) +
+  geom_point(aes_string(y = output_column.name)) +
+  #geom_bar(aes_string(y = output_column.name), stat = "identity", position = position_dodge()) +
+  facet_wrap(~ Compound, scales = "free_y")
+
+p
+
+#ggsave(here("Results", "Plots", "Metabolomics", "Trp", "Stool", paste(Sample_regex, "scatter_pooledQC1_after_normalization_Conc.pdf", sep = "")), p, width = 10)
+
+```
+
+Batch correction does not seem to make sense for Serum Tryptophan concentration data because it makes the batch effect more profound (lower p-values for batch effect - better check effect size as p-value is no direct indicator of effect size). Serum Tryptophan Area.ISTD data is barely effected by the batch, so also no batch correction necessary.
+
+
+# QCs
+
+## Checking QC RSDs
+Calculate the RSDs of the QCs. Define the regular expression applied to define which QC should be used for this calculation in `qc_regex`. Potentially filter for batch if you want to look at the RSDs for QCs in one batch only. If you want to look at the QCs in one Batch only (this might be particularly interesting if you encounter a large batch effect), set `per_batch`to F (otherwise T) and give the respective batch in `qc_batch` (e.g. "Batch2") as it is called in the column Batch.
+
+```{r QC RSDs, echo = FALSE}
+qc_regex <- "Pooled QC 1"
+
+m <- calc.RSDs(result_file_basis, QC_regex = qc_regex)
+
+m %>%
+  gather(Compound,Value, -"Batch", -"Kind") %>%
+  ggplot(aes(Compound, Value, color = Batch, shape = Kind)) +
+  geom_point() +
+  #ylim(0,30) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 7))
+```
+
+
+
+## Filter data based on QC RSDs and then save
+
+Extract only metabolites which have an RSD (%) within samples that is at least `RSD_threshold` % larger than the RSD measured in QCs for that batch in all batches. Then, save the data in the path given within the if-loop.
+
+```{r Filter and save data, echo = FALSE}
+RSD_threshold <- 20
+
+Samples_bigger_than_QC <- m %>%
+  summarize(across(where(is.numeric), ~ (1 - m[m$Kind == "QC", cur_column()]/m[m$Kind == "Samples", cur_column()]))*100, .groups = "Batch")
+
+retained_compounds <- names(Samples_bigger_than_QC %>% select(where(~all(.x > RSD_threshold, na.rm = T))))
+invalid_compounds <- setdiff(valid_compounds, retained_compounds)
+
+result_file_filtered <- result_file_basis %>%
+  select(c(Sample.Identification, Sequence.Position, Batch, Sample.Type, all_of(retained_compounds)))
+
+result_file_filtered
+
+result_file_filtered %>%
+  gather(Compound, !!output_column.name, -c(Sample.Identification, Sequence.Position, Batch, Sample.Type)) %>%
+  #filter(Compound == "Hexanoic_acid") %>%
+  #filter(Batch == "Batch2") %>%
+  ggplot(aes(x = Sequence.Position, color = Compound, fill = Compound)) +
+    geom_bar(aes_string(y = output_column.name), stat = "identity", position = "dodge")
+```
+
+
+
+```{r Export, echo = FALSE}
+if (matrix == "Serum") {
+  if (analysis == "SCFA") {
+        write_rds(result_file_filtered, here("Results","Metabolomics", "Serum", "SCFA", "Filtered_Normalized_BatchCorrected_AreaNormISTD_NAMS_SCFA_Serum.RDS"))
+  } else {
+    write_rds(result_file_filtered, here("Results","Metabolomics", "Serum", "Tryptophan", "Run2", "Filtered_Normalized_BatchCorrected_AreaNormISTD_NAMS_Trp_Serum.RDS"))
+  }
+  
+} else if (matrix == "Stool") {
+  if (analysis == "SCFA") {
+    write_rds(result_file_filtered, here("Results","Metabolomics", "Stool", "Filtered_Normalized_BatchCorrected_AreaNormISTD_NAMS_SCFA_Stool.RDS"))
+  } else {
+    write_rds(result_file_filtered, here("Results","Metabolomics", "Stool", "Filtered_Normalized_BatchCorrected_AreaNormISTD_NAMS_Trp_Stool.RDS"))
+  }
+  
+}
+```
+
+
+# PCA
+
+## Prepare PCA data
+
+### Imputation
+MICE is used as imputation method.
+```{r impute data, echo = FALSE}
+pca_result_file <- result_file_filtered
+result_file_norm_imputed <- complete(mice(pca_result_file %>%
+                                            select(-c(Sequence.Position,Batch,Sample.Type)) %>%
+                                            gather(Compound, !!metric, -Sample.Identification) %>%
+                                            mutate(Compound = paste("X", Compound, sep="")) %>%
+                                            #mutate(Compound = str_replace_all(Compound, "\\d", "X")) %>%
+                                            #mutate(Compound = str_replace_all(Compound, "_", "")) %>%
+                                            spread(Compound, !!metric) %>%
+                                            column_to_rownames(var = "Sample.Identification"),method = 'pmm', seed = 500, printFlag = FALSE),2) %>%
+  rownames_to_column("Sample.Identification")
+
+```
+
+### Prepare PCA data
+Choose the types of samples which should be used for the PCA in `sample_type` (this can be "Samples", "SamplesPools", "All", "Pools" or "Standards"). If anything with "Pools" is chosen, then only pools from batch 1 are used as they come from batch 1 samples but were analysed in all batches.
+
+```{r impute data, echo = FALSE}
+sample_type <-"Samples" # Can be Samples, SamplesPools, All, Pools or Standards
+
+if (sample_type == "Samples") {
+  concentration_basis <- result_file_norm_imputed %>%
+    filter(grepl("^[0-9]*$", Sample.Identification))
+} else if (sample_type == "SamplesPools") {
+  concentration_basis <- result_file_norm_imputed %>%
+    filter(grepl("^[0-9]*$|pool_.1|Pool", Sample.Identification))
+} else if (sample_type == "Pools") {
+  concentration_basis <- result_file_norm_imputed %>%
+    filter(grepl("pool_.1|Pool", Sample.Identification))
+} else if (sample_type == "Standards") {
+  concentration_basis <- result_file_norm_imputed %>%
+    filter(grepl("standard|QC_M", Sample.Identification))
+} else if (sample_type == "All") {
+  concentration_basis <- result_file_norm_imputed %>%
+    filter(grepl("^[0-9]*$|pool_.1|standard|QC_M|Pool", Sample.Identification))
+}
+
+batches <- merge(concentration_basis, result_file %>% select(Batch, Sample.Identification), by = "Sample.Identification") %>%
+  select(Sample.Identification,Batch) %>%
+  distinct(Sample.Identification, .keep_all = T)
+  
+concentration_PCA_metadata <- merge(merge(concentration_basis, individuals, by = "Sample.Identification"), batches, by = "Sample.Identification")
+```
+
+### Calculate PCA
+
+```{r calculate PCA, echo = FALSE}
+pca_data <- prcomp(concentration_basis %>%
+  column_to_rownames("Sample.Identification"), scale = T)
+```
+
+### Plotting the PCA
+Define what should be used as groups in `group_variable`. This must be the same name as in the data frame, so currently this can be either "Batch" or "Visit". "Visit" can only be used if only samples are evaluated! Also choose whether the filtered or the unfiltered data should be used by setting pca_filter to T or F.
+```{r PCA, echo = FALSE}
+group_variable <- "Group"
+
+if(sample_type == "Samples") {
+  groups <- as.factor(concentration_PCA_metadata %>%
+                        pull(!!group_variable))
+} else {
+  groups <- as.factor(batches %>%
+    pull(!!group_variable))
+}
+
+fviz_pca_var(pca_data,
+             col.var = "contrib",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE,
+             geom.var = c("text"))
+
+p <- fviz_pca_ind(pca_data,
+             geom = "text",
+             col.ind = groups,
+             type = "confidence",
+)
+
+#ggsave(here("Results", "Plots", "Metabolomics", "SCFA", "Serum", paste(group_variable, "PCA_Samples_Conc.pdf", sep = "")), p, width = 7)
+p
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

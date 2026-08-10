@@ -1,0 +1,552 @@
+---
+title: "BaslineTable"
+author: "Friederike Gutmann"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Preparation
+
+## Load packages
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("Packages_Metabolites.R", local = knitr::knit_global())
+```
+
+
+## Data
+
+*This part needs to be adjusted for each project!*
+
+### SampleIDs
+
+Load **sampleID list** to connect metabolomics- with metadata. The column names in the loaded file should be the same as the corresponding ones in the peak and metadata files, otherwise the merge will not work. Additionally, the peak and the meta data will be adjusted according to this file, so they only include the samples listed in that file (and vice versa). Add the column name that is connecting the sampleID file with the metadata file in `meta.merge`.
+
+```{r Connection data, echo = FALSE}
+PerProtocol_samples <- read.csv(here("Samples", "SampleIDs_PerProtocol_V1V3.csv"), header = TRUE) %>%
+  select(-Sample.Number) %>%
+  filter(Visit == "V0")
+
+dropout_samples <- read.csv(here("Samples", "SampleIDs_DropOuts_V0_wTubeID.csv"), header = TRUE) %>%
+  select(-Sample_Number, -Tube_ID)
+
+```
+
+
+### Metadata
+Load and inspect the **metadata**.
+
+```{r Metadata start, echo = TRUE}
+disease_duration <- read.csv(here("Metadata", "Disease_duration.csv"), header = TRUE, dec = ",") %>%
+  rename("PatientID" = "IDs")
+
+ms_meds <- read.csv(here("Metadata", "NAMS_Medication_pervisit.csv"), header = T, dec = ",") %>%
+  filter(grepl("v0|v3", redcap_event_name)) %>%
+  rename("PatientID" = "record_id") %>%
+  filter(if_all(everything(), ~ . != "")) %>%
+  mutate(MS.Med = str_replace_all(MS.Med, "no med", "No_DMT")) %>%
+  mutate(MS.Med = str_replace_all(MS.Med, "No med", "No_DMT")) %>%
+  mutate(MS.Med = str_replace_all(MS.Med, "Privigen", "No_DMT")) %>% #Privigen is not a DMT
+  mutate(MS.Med = str_replace_all(MS.Med, "Avonex", "Plegridy")) %>% #both infb1a
+  mutate(MS.Med = str_replace_all(MS.Med, "Gylenia", "Fingolimod"))
+
+
+ms_meds_V0_dropout <- ms_meds %>% 
+  filter(grepl("v0", redcap_event_name)) %>%
+  filter(PatientID %in% dropout_samples$PatientID) %>%
+  distinct(PatientID, MS.Med, .keep_all = TRUE) %>%
+  mutate(present = TRUE) %>%
+  pivot_wider(
+    id_cols = PatientID,
+    names_from = MS.Med,
+    values_from = present,
+    values_fill = FALSE
+  )
+
+ms_meds_V0_pp <- ms_meds %>% 
+  filter(grepl("v0", redcap_event_name)) %>%
+  filter(PatientID %in% PerProtocol_samples$PatientID) %>%
+  distinct(PatientID, MS.Med, .keep_all = TRUE) %>%
+  mutate(present = TRUE) %>%
+  pivot_wider(
+    id_cols = PatientID,
+    names_from = MS.Med,
+    values_from = present,
+    values_fill = FALSE
+  ) 
+
+#ms_meds_filtered <- ms_meds %>%
+  #mutate(MS.Med = str_replace_all(MS.Med, "L04AA36", "Ocrelizumab")) %>%
+  #mutate(MS.Med = str_replace_all(MS.Med, "L04AA23", "Natalizumab")) %>%
+  #mutate(MS.Med = str_replace_all(MS.Med, "L04AA27", "Fingolimod")) %>%
+  #mutate(MS.Med = str_replace_all(MS.Med, "L04AA31", "Teriflunomide")) %>%
+  #mutate(MS.Med = str_replace_all(MS.Med, "L04AA34", "Alemtuzumab")) %>%
+  #mutate(MS.Med = str_replace_all(MS.Med, "L04AC01", "Daclizumab")) %>%
+  #mutate(MS.Med = str_replace_all(MS.Med, "L04AX07", "DMF")) %>%
+  #mutate(MS.Med = str_replace_all(MS.Med, "L03AB07", "Ifba")) %>%
+  #mutate(MS.Med = str_replace_all(MS.Med, "L03AB08", "Ifbb")) %>%
+  #mutate(MS.Med = str_replace_all(MS.Med, "L03AX13", "Glaace")) %>%
+  #mutate(MS.Med = str_replace_all(MS.Med, "L01XC02", "Rituximab")) 
+
+
+#write_csv(ms_meds_V0_pp, here("Metadata", "MS_meds_clean.csv"))
+
+
+metadata <- read.csv(here("Metadata", "NAMS_Data_FGcurated.csv"), header = TRUE, dec = ",") %>%
+  merge(disease_duration, by = "PatientID") %>%
+  mutate(across(c(PatientID, Group, scrn_ethnicity.factor, info_gender.factor, lesion_load.v0_arm_1, lesion_load.v3_arm_1, lesion_load.v5_arm_1, dropout_prot_reason), ~ as.factor(.))) %>%
+  mutate_if(is.character, as.numeric) %>%
+  rename_with(~ gsub("_arm_1", "", .x)) %>%
+  rename_with(~ gsub("_V", ".v", .x)) %>%
+  select(-matches("_V5$|.v5"), -matches("_V3$|.v3")) %>%
+  mutate(waist_hip_ratio.v0 = mes_waist_circum.v0/mes_hip_circum_cm.v0)
+
+columns_with_inf <- sapply(metadata, function(x) any(is.infinite(x)))
+inf_columns <- names(columns_with_inf[columns_with_inf])
+metadata <- metadata %>% select(-inf_columns)
+
+#write.csv(metadata, here("Metadata", "NAMS_Metadata_for_analysis_allDiffs_wDiv_gmmsfpkm.csv"))
+```
+
+
+### Metadata for each subgroup of sample (per protocol and dropouts)
+
+```{r Metadata subgroups, echo = TRUE}
+metadata_pp <- metadata %>%
+  merge(ms_meds_V0_pp, by = "PatientID") %>%
+  filter(PatientID %in% PerProtocol_samples$PatientID)
+
+metadata_do <- metadata %>%
+  merge(ms_meds_V0_dropout, by = "PatientID") %>%
+  filter(PatientID %in% dropout_samples$PatientID)
+```
+
+# Baseline Tabelle
+
+## Age
+```{r Age Stats, echo = TRUE}
+stats_func <- function(df) {
+  group_stats_func <- df %>%
+    group_by(Group) %>%
+    summarise(
+      n = n(),
+      mean_age = round(mean(visit_age.v0, na.rm = TRUE)),
+      sd_age = round(sd(visit_age.v0, na.rm = TRUE))
+    )
+  
+  overall_stats_func <- df %>%
+    summarise(
+      group = NULL,
+      n = n(),
+      mean_age = round(mean(visit_age.v0, na.rm = TRUE)),
+      sd_age = round(sd(visit_age.v0, na.rm = TRUE))
+    )
+  
+  return(bind_rows(group_stats_func, overall_stats_func))
+  
+}
+
+stats_func(metadata_pp)
+stats_func(metadata_do)
+kruskal.test(visit_age.v0 ~ Group, data = metadata_pp)
+kruskal.test(visit_age.v0 ~ Group, data = metadata_do)
+```
+
+
+## Ethnicity
+```{r Ethnicity Stats, echo = TRUE}
+stats_ethnicity <- function(df) {
+  group_stats_func <- df %>%
+    group_by(Group) %>%
+    summarise(
+      n = n(),
+      caucasian_n = sum(scrn_ethnicity.factor == "kaukasisch/weiß", na.rm = TRUE),
+      caucasian = sum(scrn_ethnicity.factor == "kaukasisch/weiß", na.rm = TRUE)/n())
+  
+  overall_stats_func <- df %>%
+    summarise(
+      group = NULL,
+      n = n(),
+      caucasian_n = sum(scrn_ethnicity.factor == "kaukasisch/weiß", na.rm = TRUE),
+      caucasian = sum(scrn_ethnicity.factor == "kaukasisch/weiß", na.rm = TRUE)/n())
+  
+  return(bind_rows(group_stats_func, overall_stats_func))
+  
+}
+
+stats_ethnicity(metadata_pp)
+stats_ethnicity(metadata_do)
+
+chisq.test(metadata_pp$Group, metadata_pp$scrn_ethnicity.factor)
+chisq.test(metadata_do$Group, metadata_do$scrn_ethnicity.factor)
+
+```
+
+
+
+## Gender
+```{r Ethnicity Stats, echo = TRUE}
+stats_ethnicity <- function(df) {
+  group_stats_func <- df %>%
+    group_by(Group) %>%
+    summarise(
+      n = n(),
+      goddess_n = sum(info_gender.factor == "female", na.rm = TRUE),
+      goddess = sum(info_gender.factor == "female", na.rm = TRUE)/n())
+  
+  overall_stats_func <- df %>%
+    summarise(
+      group = NULL,
+      n = n(),
+      goddess_n = sum(info_gender.factor == "female", na.rm = TRUE),
+      goddess = sum(info_gender.factor == "female", na.rm = TRUE)/n())
+  
+  return(bind_rows(group_stats_func, overall_stats_func))
+  
+}
+
+stats_ethnicity(metadata_pp)
+stats_ethnicity(metadata_do)
+
+chisq.test(metadata_pp$Group, metadata_pp$info_gender.factor)
+chisq.test(metadata_do$Group, metadata_do$info_gender.factor)
+
+```
+
+
+## Disease duration
+```{r duration Stats, echo = TRUE}
+stats_func <- function(df) {
+  group_stats_func <- df %>%
+    group_by(Group) %>%
+    summarise(
+      n = n(),
+      median = round(median(Disease_Duration_.months., na.rm = TRUE)),
+      IQR = round(IQR(Disease_Duration_.months., na.rm = TRUE))
+    )
+  
+  overall_stats_func <- df %>%
+    summarise(
+      group = NULL,
+      n = n(),
+      median = round(median(Disease_Duration_.months., na.rm = TRUE)),
+      IQR = round(IQR(Disease_Duration_.months., na.rm = TRUE))
+    )
+  
+  return(bind_rows(group_stats_func, overall_stats_func))
+  
+}
+
+stats_func(metadata_pp)
+stats_func(metadata_do)
+kruskal.test(Disease_Duration_.months. ~ Group, data = metadata_pp)
+kruskal.test(Disease_Duration_.months. ~ Group, data = metadata_do)
+
+```
+
+
+## Diagnosis paste
+```{r Diagnosis Stats, echo = TRUE}
+stats_func <- function(df) {
+  group_stats_func <- df %>%
+    group_by(Group) %>%
+    summarise(
+      n = n(),
+      median = round(median(Diagnosis_Duration_.months., na.rm = TRUE)),
+      IQR = round(IQR(Diagnosis_Duration_.months., na.rm = TRUE))
+    )
+  
+  overall_stats_func <- df %>%
+    summarise(
+      group = NULL,
+      n = n(),
+      median = round(median(Diagnosis_Duration_.months., na.rm = TRUE)),
+      IQR = round(IQR(Diagnosis_Duration_.months., na.rm = TRUE))
+    )
+  
+  return(bind_rows(group_stats_func, overall_stats_func))
+  
+}
+
+stats_func(metadata_pp)
+stats_func(metadata_do)
+kruskal.test(Diagnosis_Duration_.months. ~ Group, data = metadata_pp)
+kruskal.test(Diagnosis_Duration_.months. ~ Group, data = metadata_do)
+
+```
+
+
+## EDSS paste
+```{r EDSS Stats, echo = TRUE}
+stats_func <- function(df) {
+  group_stats_func <- df %>%
+    group_by(Group) %>%
+    summarise(
+      n = n(),
+      median = round(median(edss.v0, na.rm = TRUE)),
+      IQR = round(IQR(edss.v0, na.rm = TRUE))
+    )
+  
+  overall_stats_func <- df %>%
+    summarise(
+      group = NULL,
+      n = n(),
+      median = round(median(edss.v0, na.rm = TRUE)),
+      IQR = round(IQR(edss.v0, na.rm = TRUE))
+    )
+  
+  return(bind_rows(group_stats_func, overall_stats_func))
+  
+}
+
+stats_func(metadata_pp)
+stats_func(metadata_do)
+kruskal.test(edss.v0 ~ Group, data = metadata_pp)
+kruskal.test(edss.v0 ~ Group, data = metadata_do)
+
+```
+
+
+## T2 lesions
+```{r EDSS Stats, echo = TRUE}
+stats_func <- function(df) {
+  group_stats_func <- df %>%
+    group_by(Group) %>%
+    summarise(
+      n = n(),
+      median = round(median(mri_t2call.v0, na.rm = TRUE)),
+      IQR = round(IQR(mri_t2call.v0, na.rm = TRUE))
+    )
+  
+  overall_stats_func <- df %>%
+    summarise(
+      group = NULL,
+      n = n(),
+      median = round(median(mri_t2call.v0, na.rm = TRUE)),
+      IQR = round(IQR(mri_t2call.v0, na.rm = TRUE))
+    )
+  
+  return(bind_rows(group_stats_func, overall_stats_func))
+  
+}
+
+stats_func(metadata_pp)
+stats_func(metadata_do)
+
+kruskal.test(mri_t2call.v0 ~ Group, data = metadata_pp)
+kruskal.test(mri_t2call.v0 ~ Group, data = metadata_do)
+
+```
+
+
+
+## BMI paste
+```{r BMI Stats, echo = TRUE}
+stats_func <- function(df) {
+  group_stats_func <- df %>%
+    group_by(Group) %>%
+    summarise(
+      n = n(),
+      median = round(median(bmi.v0, na.rm = TRUE), 1),
+      IQR = round(IQR(bmi.v0, na.rm = TRUE), 1)
+    )
+  
+  overall_stats_func <- df %>%
+    summarise(
+      group = NULL,
+      n = n(),
+      median = round(median(bmi.v0, na.rm = TRUE), 1),
+      IQR = round(IQR(bmi.v0, na.rm = TRUE), 1)
+    )
+  
+  return(bind_rows(group_stats_func, overall_stats_func))
+  
+}
+
+stats_func(metadata_pp)
+stats_func(metadata_do)
+
+kruskal.test(bmi.v0 ~ Group, data = metadata_pp)
+kruskal.test(bmi.v0 ~ Group, data = metadata_do)
+```
+
+
+## VitaminD
+```{r VitaminD Stats, echo = TRUE}
+stats_func <- function(df) {
+  group_stats_func <- df %>%
+    group_by(Group) %>%
+    summarise(
+      n = n(),
+      mean = round(mean(lab_vitamind.v0, na.rm = TRUE), 1),
+      sd = round(sd(lab_vitamind.v0, na.rm = TRUE), 1)
+    )
+  
+  overall_stats_func <- df %>%
+    summarise(
+      group = NULL,
+      n = n(),
+      mean = round(mean(lab_vitamind.v0, na.rm = TRUE), 1),
+      sd = round(sd(lab_vitamind.v0, na.rm = TRUE), 1)
+    )
+  
+  return(bind_rows(group_stats_func, overall_stats_func))
+  
+}
+
+stats_func(metadata_pp)
+stats_func(metadata_do)
+kruskal.test(lab_vitamind.v0 ~ Group, data = metadata_pp)
+kruskal.test(lab_vitamind.v0 ~ Group, data = metadata_do)
+```
+
+
+## Fatigue paste
+```{r Fatigue Stats, echo = TRUE}
+stats_func <- function(df) {
+  group_stats_func <- df %>%
+    group_by(Group) %>%
+    summarise(
+      n = n(),
+      median = round(median(fss_score.v0, na.rm = TRUE), 1),
+      IQR = round(IQR(fss_score.v0, na.rm = TRUE), 1)
+    )
+  
+  overall_stats_func <- df %>%
+    summarise(
+      group = NULL,
+      n = n(),
+      median = round(median(fss_score.v0, na.rm = TRUE), 1),
+      IQR = round(IQR(fss_score.v0, na.rm = TRUE), 1)
+    )
+  
+  return(bind_rows(group_stats_func, overall_stats_func))
+  
+}
+
+stats_func(metadata_pp)
+stats_func(metadata_do)
+kruskal.test(fss_score.v0 ~ Group, data = metadata_pp)
+kruskal.test(fss_score.v0 ~ Group, data = metadata_do)
+```
+
+
+## BDI paste
+```{r BMI Stats, echo = TRUE}
+stats_func <- function(df) {
+  group_stats_func <- df %>%
+    group_by(Group) %>%
+    summarise(
+      n = n(),
+      median = round(median(bdi2_score_corrected.v0, na.rm = TRUE), 1),
+      IQR = round(IQR(bdi2_score_corrected.v0, na.rm = TRUE), 1)
+    )
+  
+  overall_stats_func <- df %>%
+    summarise(
+      group = NULL,
+      n = n(),
+      median = round(median(bdi2_score_corrected.v0, na.rm = TRUE), 1),
+      IQR = round(IQR(bdi2_score_corrected.v0, na.rm = TRUE), 1)
+    )
+  
+  return(bind_rows(group_stats_func, overall_stats_func))
+  
+}
+
+stats_func(metadata_pp)
+stats_func(metadata_do)
+kruskal.test(bdi2_score_corrected.v0 ~ Group, data = metadata_pp)
+kruskal.test(bdi2_score_corrected.v0 ~ Group, data = metadata_do)
+```
+
+
+
+
+## SDMT paste
+```{r BMI Stats, echo = TRUE}
+stats_func <- function(df) {
+  group_stats_func <- df %>%
+    group_by(Group) %>%
+    summarise(
+      n = n(),
+      median = round(median(sdmt_result.v0, na.rm = TRUE), 1),
+      IQR = round(IQR(sdmt_result.v0, na.rm = TRUE), 1)
+    )
+  
+  overall_stats_func <- df %>%
+    summarise(
+      group = NULL,
+      n = n(),
+      median = round(median(sdmt_result.v0, na.rm = TRUE), 1),
+      IQR = round(IQR(sdmt_result.v0, na.rm = TRUE), 1)
+    )
+  
+  return(bind_rows(group_stats_func, overall_stats_func))
+  
+}
+
+stats_func(metadata_pp)
+stats_func(metadata_do)
+kruskal.test(sdmt_result.v0 ~ Group, data = metadata_pp)
+kruskal.test(sdmt_result.v0 ~ Group, data = metadata_do)
+```
+
+
+
+## DMT
+```{r DMT Stats, echo = TRUE}
+stats_func <- function(df) {
+  group_stats_func <- df %>%
+    group_by(Group) %>%
+    summarise(
+      n = n(),
+      goddess_n = sum(No_DMT == T),
+      goddess = sum(No_DMT == T)/n()*100)
+  
+  overall_stats_func <- df %>%
+    summarise(
+      group = NULL,
+      n = n(),
+      goddess_n = sum(No_DMT == T),
+      goddess = sum(No_DMT == T)/n()*100)
+  
+  return(bind_rows(group_stats_func, overall_stats_func))
+  
+}
+
+stats_func(metadata_pp)
+stats_func(metadata_do)
+chisq.test(metadata_pp$Group, metadata_pp$No_DMT)
+chisq.test(metadata_do$Group, metadata_do$No_DMT)
+```
+
+
+## Single Meds
+```{r Meds Stats, echo = TRUE}
+stats_func <- function(df, med_name) {
+  group_stats_func <- df %>%
+    group_by(Group) %>%
+    summarise(
+      n = n(),
+      sum = sum({{med_name}} == T),
+      percent = round(sum({{med_name}} == T)/n()*100))
+  
+  overall_stats_func <- df %>%
+    summarise(
+      group = NULL,
+      n = n(),
+      sum = sum({{med_name}} == T),
+      percent = round(sum({{med_name}} == T)/n()*100))
+  
+  return(bind_rows(group_stats_func, overall_stats_func))
+  
+}
+names(ms_meds_filtered)
+stats_func(metadata_pp, No_DMT)
+stats_func(metadata_do, Tecfidera)
+
+chisq.test(metadata_pp$Group, metadata_pp$Aubagio)
+chisq.test(metadata_do$Group, metadata_do$Rituximab)
+```

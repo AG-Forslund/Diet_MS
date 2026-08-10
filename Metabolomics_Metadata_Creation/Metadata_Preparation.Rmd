@@ -1,0 +1,209 @@
+---
+title: "Metadata_Analysis"
+author: "Friederike Gutmann"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+# Preparation
+
+## Functions, plot code and packages
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("Functions_Metabolites.R", local = knitr::knit_global())
+source("Plots_Metabolites.R", local = knitr::knit_global())
+source("Packages_Metabolites.R", local = knitr::knit_global())
+```
+
+
+## Data
+
+### SampleIDs
+
+Load **sampleID list** to connect metabolomics- with metadata. The column names in the loaded file should be the same as the corresponding ones in the peak and metadata files, otherwise the merge will not work. Additionally, the peak and the meta data will be adjusted according to this file, so they only include the samples listed in that file (and vice versa). Add the column name that is connecting the sampleID file with the metadata file in `meta.merge`.
+
+```{r Connection data, echo = FALSE}
+sampleIDs <- read.csv(here("Samples", "SampleIDs_PerProtocol_V1V3.csv"), header = TRUE) %>%
+  mutate(Sample.Identification = Sample.Number) %>%
+  select(-Sample.Number)
+
+diversity <- read.csv(here("Results", "Metagenomics", "Rarefied_alpha_diversity_B1.csv"), header = TRUE) %>%
+  pivot_wider(
+    id_cols = PatientID,
+    names_from = Visit,
+    values_from = c(diversity_shannon, Sample_Number),
+    names_glue = "{.value}_{Visit}"
+  )
+
+beta_div <- read_csv(here("Metadata", "PC_metadata_long_gmmsfpkm.csv")) %>%
+  merge(., sampleIDs %>% mutate(Tube_ID = paste("S",Sample.Identification, sep = "")) %>% dplyr::select(PatientID, Visit, Tube_ID), by = "Tube_ID") %>%
+  pivot_wider(id_cols = PatientID, names_from = Visit, values_from = c(X1_microbiom, X2_microbiom, X1_metabolome, X2_metabolome), names_glue = "{.value}_{Visit}")
+
+medication <- read_csv(here("Metadata", "NAMS_Begleitmedikation_export_medsonly.csv")) %>%
+  rename(MedAmount = med_amount) %>%
+  rename(PatientID = record_id) %>%
+  pivot_longer(cols = starts_with("med_"), names_to = "MedColumn", values_to = "MedCode", values_drop_na = TRUE) %>%
+  pivot_wider(id_cols = PatientID, names_from = MedCode, values_from = MedCode, values_fn = length, values_fill = 0)
+
+medication_short <- medication %>%
+  rowwise() %>%
+  mutate(
+    XMetabolism = sum(c_across(starts_with("A") & !matches("PatientID")), na.rm = TRUE),
+    XBlood = sum(c_across(starts_with("B") & !matches("PatientID")), na.rm = TRUE),
+    XCardiovascular = sum(c_across(starts_with("C") & !matches("PatientID")), na.rm = TRUE),
+    XDermatologicals = sum(c_across(starts_with("D") & !matches("PatientID")), na.rm = TRUE),
+    XSexHormones = sum(c_across(starts_with("G") & !matches("PatientID")), na.rm = TRUE),
+    XOtherHormones = sum(c_across(starts_with("H") & !matches("PatientID")), na.rm = TRUE),
+    XAntiinfectives = sum(c_across(starts_with("J") & !matches("PatientID")), na.rm = TRUE),
+    XImmunomodulating = sum(c_across(starts_with("L") & !matches("PatientID")), na.rm = TRUE),
+    DMT_Injectable = sum(c_across(contains(c("L03AB07", "L03AB08", "L03AB13", "L03AX13")) & !matches("PatientID")), na.rm = TRUE),
+    DMT_Oral = sum(c_across(contains(c("L04AX07", "L04AA27", "L04AA31", "L01BB04")) & !matches("PatientID")), na.rm = TRUE),
+    DMT_Antibodies = sum(c_across(contains(c("L04AA36", "L04AA23")) & !matches("PatientID")), na.rm = TRUE),
+    XMusculoskeletal  = sum(c_across(starts_with("M") & !matches("PatientID")), na.rm = TRUE),
+    XNerveous = sum(c_across(starts_with("N") & !matches("PatientID")), na.rm = TRUE),
+    XAntiparasitic = sum(c_across(starts_with("P") & !matches("PatientID")), na.rm = TRUE),
+    XRespiratory = sum(c_across(starts_with("R") & !matches("PatientID")), na.rm = TRUE),
+    XSensory = sum(c_across(starts_with("S") & !matches("PatientID")), na.rm = TRUE),
+    XVarious = sum(c_across(starts_with("V") & !matches("PatientID")), na.rm = TRUE),
+  ) %>%
+  ungroup() %>%
+  dplyr::select(PatientID, last_col(13):last_col()) %>%
+  mutate(Hormones = XSexHormones+XOtherHormones) %>%
+  rename_with(~ sub("^X", "", .), starts_with("X")) %>%
+  dplyr::select(-Various, -Antiparasitic, -SexHormones, -OtherHormones) #exclude columns without enough counts
+
+v5_outcomes <- read.csv(here("Metadata", "Outcomes_V5.csv"), header = TRUE, dec = ",") %>%
+  mutate(across(-PatientID, ~as.numeric(.)))
+
+meta.merge <- "PatientID"
+
+medication_short %>% summarise(across(everything(), ~sum(!is.na(.) & . != 0)))
+medication %>% merge(., sampleIDs, by = c("PatientID")) %>% select(c("Group","L04AX07", "L04AA27", "L04AA31", "L01BB04"))
+```
+
+
+#### Metadata
+Load and inspect the **metadata**.
+
+```{r Metadata start, echo = TRUE}
+metadata <- read.csv(here("Metadata", "NAMS_Metadata_for_analysis.csv"), header = TRUE, dec = ",") %>%
+  #merge(., diversity %>% select(PatientID, diversity_shannon_V0, diversity_shannon_V3), by = "PatientID") %>%
+  #merge(., beta_div, by = "PatientID") %>%
+  merge(., medication_short, by = "PatientID") %>%
+  mutate(across(c(PatientID, Group, scrn_ethnicity.factor, info_gender.factor, lesion_load.v0_arm_1, lesion_load.v3_arm_1, lesion_load.v5_arm_1, dropout_prot_reason), ~ as.factor(.))) %>%
+  #mutate(across(c(PatientID, Group, scrn_ethnicity.factor, info_gender.factor, lesion_load.v0_arm_1, lesion_load.v3_arm_1, lesion_load.v5_arm_1, dropout_prot_reason), ~ na_if(.x, ""))) %>%
+  mutate_if(is.character, as.numeric) %>%
+  rename_with(~ gsub("_arm_1", "", .x)) %>%
+  rename_with(~ gsub("_V", ".v", .x)) %>%
+  select(-matches("_V5$|.v5")) %>%
+  merge(., v5_outcomes, by = "PatientID") %>%
+  mutate(waist_hip_ratio.v0 = mes_waist_circum.v0/mes_hip_circum_cm.v0) %>%
+  mutate(waist_hip_ratio.v3 = mes_waist_circum.v3/mes_hip_circum_cm.v3) %>%
+  mutate(diff_v_lesions_absdiff.v5 = mri_t2vall.v5 - mri_t2vall.v0) %>%
+  mutate(diff_c_lesions_absdiff.v5 = mri_t2call.v5 - mri_t2call.v0) %>%
+  mutate(diff_v_lesions_percdiff.v5 = ((mri_t2vall.v5 / mri_t2vall.v0)-1)*100) %>%
+  mutate(diff_c_lesions_percdiff.v5 = ((mri_t2call.v5 / mri_t2call.v0)-1)*100) %>%
+  mutate(edss.percdiff.v5 = ((edss.v5 / edss.v0)-1)*100) %>%
+  mutate(edss.absdiff.v5 = edss.v5 - edss.v0) %>%
+  mutate(NFL.percdiff.v5 = ((NFL.v5 / NFL.v0)-1)*100) %>%
+  mutate(NFL.absdiff.v5 = NFL.v5 - NFL.v0) %>%
+  #mutate(across(ends_with("_v0"), ~ ((get(sub(".v0", ".v3", cur_column())) - .) / .) * 100, .names = "{sub('.v0', '.pct_change', .col)}")) %>%
+  mutate(across(matches(".v3") & !any_of(c("mri_pbvc.v3", "lab_uric_acid.v3", "fss_change.v3", "diff_v_lesions.v3", "diff_c_lesions.v3", "diff_v_lesion.v3")), ~ . - get(sub(".v3", ".v0", cur_column())), .names = "{sub('.v3', '.absdiff', .col)}")) %>%
+ # mutate(across(c("edss.v0", "bdi2_score_corrected.v0", "lab_bhb.v0", "nutri_alkohol.v0", "nutri_n_3_fettsaeuren.v0", "edss.v3", "bdi2_score_corrected.v3", "lab_bhb.v3", "nutri_alkohol.v3", "nutri_n_3_fettsaeuren.v3"), ~ . + 0.00000000000001)) %>% #This is used for when to create percent differences
+  mutate(across(matches(".v3") & !any_of(c("mri_pbvc.v3", "lab_uric_acid.v3", "fss_change.v3", "diff_v_lesions.v3", "diff_c_lesions.v3", "diff_v_lesion.v3")), ~ ((. / get(sub(".v3", ".v0", cur_column())))-1)*100, .names = "{sub('.v3', '.percdiff', .col)}"))
+
+columns_with_inf <- sapply(metadata, function(x) any(is.infinite(x)))
+inf_columns <- names(columns_with_inf[columns_with_inf])
+metadata <- metadata %>% select(-inf_columns)
+
+#write.csv(metadata, here("Metadata", "NAMS_Metadata_for_analysis_allDiffs_wDiv_gmmsfpkm.csv"))
+```
+
+
+Work further on metadata set.  The metadata will be subsetted according to which samples are actually present in the data (as defined in the subsetted sampleIDs). Are there any variables that should be excluded, then give them in `irrelevant.vars`.
+
+```{r Metadata, echo = TRUE}
+irrelevant.vars <- c("X", "lesion_load.absdiff", "diff_n_lesions", "diff_v_lesions", "V1.v0", "V1.v3", "V1.absdiff", "V1.percdiff", "attendance_dietary_session", "FAS_yes")
+
+mdata <- metadata
+mdata[irrelevant.vars] <- list(NULL)
+mdata <- subset(mdata, mdata[,meta.merge] %in% sampleIDs[,meta.merge])
+#write.csv(mdata, here("Metadata", "NAMS_Metadata_for_analysis.csv"))
+mdata.vars <- mdata %>%
+  distinct(PatientID, .keep_all = T) %>%
+  select(-all_of(meta.merge)) %>%
+  dplyr::select(-contains(c("absdiff", "percdiff", "nutri_")))
+
+head(mdata)
+```
+
+
+One can also check here, whether there are meta variables which are only present in one of the groups. If in one group there are only NAs, the meta variables should be excluded. Also, if `na.threshold.metavariables` of entries for a metavariable are NAs, this metavariable is excluded. The same goes for samples. Give the amount of patients per group that have 0s in their any of the medication rows in `medication.zero.theshold`.
+```{r Exclude barely existing variables, echo = TRUE}
+na.threshold.metavariables <- 0.7
+medication.zero.theshold <- 1
+
+exclude.from.mdata <- mdata %>%
+  group_by(Group) %>%
+  summarise(across(everything(), ~ sum(is.na(.)) > na.threshold.metavariables*n())) %>%
+  dplyr::select(where(~ any(. == T))) %>%
+  names()
+
+medication.exclude <- mdata %>%
+  group_by(Group) %>%
+  summarise(across(names(medication_short), ~sum(. == 0, na.rm = T) > medication.zero.theshold*n())) %>%
+  dplyr::select(where(~ any(. == T))) %>%
+  names()
+
+
+mdata <- mdata %>%
+  dplyr::select(-all_of(c(exclude.from.mdata, medication.exclude)))
+
+#write.csv(mdata, here("Metadata", "NAMS_Metadata_for_analysis_allDiffs_wDiv_filtered_gmmsfpkm.csv"))
+```
+
+```{r Exclude barely existing variables, echo = TRUE}
+mdata_long <- mdata %>%
+  pivot_longer(
+    cols = ends_with(c(".v0", ".v3")),
+    names_to = c(".value", "Visit"),
+    names_pattern = "(.+)\\.v(.)"
+  ) %>%
+  mutate(Visit = paste0("V", Visit)) %>%
+  select(-ends_with(c(".percdiff", ".absdiff")), -starts_with(c("lab_kalium", "lab_trium", "lab_kreatinin", "lab_urea", "lab_uric", "fss_change")), -delta_lesion_load) %>%
+  merge(., sampleIDs %>% select(-Group) %>% mutate(Sample.Identification = paste("S", Sample.Identification, sep = "")), by = c("PatientID", "Visit"))
+
+#write.csv(mdata_long, here("Metadata", "NAMS_Metadata_for_analysis_long_wDiv_filtered_gmmsfpkm.csv"))
+```
+
+
+### Plotting correlation between bhb measured in the lab and measured by ourselves
+
+```{r BHB correlation, echo = FALSE, warning=FALSE}
+serum_metabolomics_data <- readRDS(here("Results", "Metabolomics", "Serum", "NAMS_Serum_AreaNormISTD_data.RDS")) %>%
+  merge(., sampleIDs, by = "Sample.Identification") %>%
+  dplyr::select(X3_Hydroxy_butyric_acid, Visit, PatientID)
+
+bhb_data_only <- metadata %>%
+  dplyr::select(PatientID, lab_bhb.v0, lab_bhb.v3) %>%
+  pivot_longer(
+    cols = c(lab_bhb.v0, lab_bhb.v3),
+    names_to = "BHB_visit",
+    values_to = "BHB_value"
+  ) %>%
+  mutate(Visit = paste("V", str_extract(BHB_visit, "\\d+"), sep="")) %>%
+  merge(., serum_metabolomics_data, by = c("PatientID", "Visit"))
+
+p <- bhb_data_only %>%
+  ggplot(aes(BHB_value, X3_Hydroxy_butyric_acid, shape = as.factor(Visit), color = as.factor(Visit))) +
+  geom_point(size = 3) +
+  scale_color_manual(values = c("#882255", "#999933")) +
+  theme_classic()
+
+#ggsave(here("Results", "Plots", "BHB_3HT_Correlation.pdf"), p)
+cor.test(bhb_data_only$BHB_value, bhb_data_only$X3_Hydroxy_butyric_acid)
+```
+
+
