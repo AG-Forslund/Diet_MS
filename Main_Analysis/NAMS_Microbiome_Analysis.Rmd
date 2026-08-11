@@ -1,0 +1,440 @@
+---
+title: "NAMS_Microbiome_Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("2_DIff_diversity.R", local = knitr::knit_global())
+source("Plots.R", local = knitr::knit_global())
+source("Packages.R", local = knitr::knit_global())
+source("Functions.R", local = knitr::knit_global())
+```
+
+## Load and prepare count Data
+Set `tax.level` so the correct file is chosen and the plot is saved with that name. Also choose which `type` of analysis you want to run and which `matrix` was used which is only relevant for `type == "metabolomics"`. This will create a data frame with feature data per patient and one with tryptophan ratios if `type == "metabolomics" & matrix == "serum"`. 
+```{r Data}
+tax_level <- "Genus" #choose e.g. "Species", "Phylum", "mOTUs_ID" or "functional", "gmms"
+type <- "microbiome" # choose "microbiome" or "metabolomics". "Both" should not be used as the intergrated analysis is done in a different script.
+matrix <- "stool" # choose either "stool" or "serum"
+
+taxonomy <- read.csv(here("data", "Rarefied_mOTU_taxonomy_B1.csv")) %>%
+    mutate(across(where(is.character), ~ str_replace_all(., pattern = "[ :/\\[\\]\\-\\(\\)]", replacement = "_"))) %>%
+    mutate(across(where(is.character), ~ str_replace_all(., pattern = "^_+|_+$", replacement = ""))) %>%
+    mutate(across(everything(), as.factor))
+  
+if(tax_level == "mOTUs_ID"){
+    countdata <- read.csv(here("data", "Rarefied_mOTU_counts_B1.csv"))
+} else if(tax_level == "functional") {
+  countdata <- read.table(here("data", "nams_kegg_all_fpkm.txt"), sep = "\t", header = T) %>%
+    textshape::column_to_rownames(., loc = 1) %>%
+    slice(-1) %>%
+    rownames_to_column("entry") %>%
+    mutate(entry = str_remove(entry, "ko:"))
+  microbiome_data <- countdata %>%
+    dplyr::select(-starts_with("Sn"), -starts_with("Sp")) %>%
+    column_to_rownames(., loc = 1)
+} else if(tax_level == "gmms" | tax_level == "gbms") {
+  keggs <- read.table(here("data", "nams_kegg_all_fpkm.txt"), sep = "\t", header = T) %>%
+    textshape::column_to_rownames(., loc = 1) %>%
+    slice(-1) %>%
+    rownames_to_column("Feature") %>%
+    mutate(Feature = str_remove(Feature, "ko:"))
+  if(tax_level == "gmms") {
+    db <- loadDefaultDB()
+  } else if (tax_level == "gbms") {
+    db <- loadDB("GBMs.v1.0")
+  }
+  
+  mods <- rpm(keggs, minimum.coverage=0.3, annotation = 1, module.db = db, distribute = T)
+  
+  # Download and parse GMMs file
+  gmm_url <- "https://raw.githubusercontent.com/omixer/omixer-rpmR/main/inst/extdata/GMMs.v1.07.txt"
+  gmm_lines <- readLines(gmm_url)
+  
+  # Initialize storage
+  module_ko <- data.frame(Module = character(), KO = character(), stringsAsFactors = FALSE)
+  current_module <- NA
+  
+  for (line in gmm_lines) {
+    line <- trimws(line)
+    if (grepl("^MF\\d+", line)) {
+      # Extract module ID (first MF-prefixed value)
+      current_module <- strsplit(line, "\\s+")[[1]][1]
+    } else if (grepl("^K\\d+", line) && !is.na(current_module)) {
+      # Extract all KOs in line and create rows
+      kos <- unlist(strsplit(line, "[\t, ]+"))
+      kos <- kos[grepl("^K\\d+", kos)]  # Filter only K-prefixed
+      module_ko <- rbind(
+        module_ko,
+        data.frame(
+          Module = rep(current_module, length(kos)),
+          KO = kos,
+          stringsAsFactors = FALSE
+        )
+      )
+    }
+  }
+  
+  microbiome_data <- asDataFrame(mods, "abundance") %>%
+    dplyr::select(-Description) %>%
+    textshape::column_to_rownames(., loc = 1) %>%
+    dplyr::select(-starts_with("Sn"), -starts_with("Sp"))
+  
+  descriptions <- data.frame(db@module.names) %>%
+      rownames_to_column("Module") 
+    
+    microbiome_data <- microbiome_data %>%
+      rownames_to_column("Module") %>%
+      merge(., descriptions, by = "Module") %>%
+      column_to_rownames("V2") %>%
+      dplyr::select(-Module)
+    
+    module_ko <- module_ko %>%
+      merge(., descriptions, by = "Module")
+    
+    #write_csv(module_ko, here("data", "module_to_ko.csv"))
+    
+} else {
+    #countdata2 <- read.csv(here("data", "mOTUs_filtered.csv"))
+    countdata <- read.csv(here("data", "mOTUs_ID_NAMS_filtered_B1.csv"))
+}
+  
+if (!tax_level %in% c("gmms", "gbms", "functional")) {
+  full_microbiome_data <- merge(taxonomy, countdata, by = "mOTUs_ID")
+  
+  if (tax_level %in% names(taxonomy)) {
+      microbiome_data <- full_microbiome_data %>%
+        dplyr::select(!!tax_level, everything()) %>%
+        dplyr::select(-names(taxonomy)[names(taxonomy) != tax_level]) %>%
+        group_by(!!sym(tax_level)) %>%
+        summarise(across(everything(), sum, na.rm = TRUE)) %>%
+        textshape::column_to_rownames(., loc = 1)
+  } else {
+      microbiome_data <- read.table(here("data", "nams_GMGC_all_fpkm.txt"), sep = "\t", header = T) %>%
+        textshape::column_to_rownames(., loc = 1)
+  }
+  
+}
+
+div <- read_csv(here("data", "Rarefied_alpha_diversity_B1.csv")) #choose correct Batch here!!
+diversity_data <- div %>% dplyr::select(diversity_shannon, PatientID, Group, Visit)
+beta_div <- read_csv(here("data", "PC_metadata_long.csv")) %>%
+  column_to_rownames("Tube_ID")
+
+group.var <- "Group"
+
+group_palette <- c("#117733", "#661100", "#332288")
+```
+
+### Load Metadata
+`irrelevant.vars` will deleted from the metadata in the rest of the analysis. `use.shannon` will use the metadata that includes variables about the microbial diversity. `use.nutri` will add all nutritional variables to the metadata. This will create a metadata frame with all variables per sample (so per patient over both visits).
+```{r Load Metadata}
+use.diversity <- T #should the metadata include the shannon and beta diversity?
+meta.merge <- "PatientID"
+id.merge <- "Tube_ID"
+time.var <- "Visit"
+
+SampleIDs <- read.csv(here("data", "SampleIDs_PerProtocol_V1V3.csv"), stringsAsFactors = F) %>%
+  rename(Sample.Identification = Sample_Number) %>%
+  mutate(Group = factor(case_when(
+    Group == 1 ~ "Control",
+    Group == 2 ~ "ketogenic",
+    Group == 3 ~ "fasting",
+    TRUE ~ as.character(Group)
+  ), levels = c("Control", "ketogenic", "fasting"))) %>%
+  mutate(Visit = as.factor(Visit))
+
+if(use.diversity == TRUE) {
+  metadata <- read.csv(here("data", "NAMS_Metadata_for_analysis_allDiffs_wDiv_filtered.csv"), stringsAsFactors = T) %>%
+    dplyr::select(-X)
+} else {
+  metadata <- read.csv(here("data", "NAMS_Metadata_for_analysis_allDiffs_filtered.csv"), stringsAsFactors = T) %>%
+    dplyr::select(-X)
+}
+
+```
+
+
+### Prep microbiome data
+Should filtering be applied, set `filter_counts` to `TRUE`. Then, only taxa which have counts in `group_count_filter` % of samples per group are considered. Also, taxa are filtered based on their general abundance - the threshold can be given in `relative_abundance`. This will create the final filtered file and for it to be saves, one must remove the hashtag in front of the respective `write_csv()`.
+```{r MetadeconfoundR microbiome data prep}
+filter_counts = T #only necessary on mOTU and functional!!!
+group_count_filter <- 0.5 
+relative_abundance <- 0.01
+
+if (filter_counts) {
+  #Cleaning: remove unassigned taxa
+  microbiome_data_x <- data.frame(t(microbiome_data)) %>%
+    rownames_to_column("Tube_ID") %>%
+    merge(., SampleIDs %>% dplyr::select(Tube_ID, Group, Visit), by = "Tube_ID") %>%
+    column_to_rownames("Tube_ID") %>%
+    dplyr::select(-any_of("unassigned"))
+  
+  #Prevalence filtering: Remove taxa found in less than 50% of samples per group and visit (for any of these combinations, so appearing in one group-visit pair in over `group_count_filter` % of samples is enough to be retained)
+  columns_to_keep <- unique(microbiome_data_x %>%
+    group_by(Group, Visit) %>%
+    summarise(across(everything(), ~ mean(.x > 0, na.rm = TRUE)), .groups = "drop") %>%
+    pivot_longer(-c(Group, Visit), names_to = "Feature", values_to = "Proportion") %>%
+    filter(Proportion >= group_count_filter) %>%
+    pull(Feature))
+
+  microbiome_data_filtered <- microbiome_data_x %>%
+    dplyr::select(all_of(columns_to_keep))
+  
+  #Abundance filtering: Remove taxa with less than 'relative_abundance' % relative abundance
+  relative_abundance_ok <- microbiome_data_filtered %>%
+    rownames_to_column("SampleID") %>%
+    pivot_longer(-SampleID, names_to = "Feature", values_to = "Count") %>%
+    group_by(SampleID) %>%
+    mutate(Total = sum(Count)) %>%
+    ungroup() %>%
+    mutate(rel_abundance = (Count / Total) * 100) %>%
+    group_by(Feature) %>%
+    summarise(max_abundance = max(rel_abundance, na.rm = TRUE)) %>%
+    filter(max_abundance >= relative_abundance) %>%
+    pull(Feature)
+  
+  microbiome_data <- data.frame(t(microbiome_data_filtered %>%
+    dplyr::select(all_of(relative_abundance_ok))))
+  
+  #write_csv(microbiome_data %>% rownames_to_column("mOTUs_ID"), here("data", paste(tax_level,"NAMS_filtered_B1.csv", sep = "_"))) #for mOTUs/gmms/gbms (fpkm addition only for gmm/gbm processing)
+  #write_csv(microbiome_data %>% rownames_to_column("Feature"), here("data", paste("keggKOs","NAMS_filtered_B1.csv", sep = "_"))) #for functional (aka KOs)
+}
+
+#write_csv(microbiome_data %>% rownames_to_column("Feature"), here("data", paste(tax_level,"NAMS_filtered_B1.csv", sep = "_"))) #for Species to Phylum level
+
+if(type == "microbiome") {
+  microbiome_data_t <- data.frame(t(microbiome_data))
+  
+  microbiome_data_metadata <- microbiome_data_t %>%
+    rownames_to_column("Tube_ID") %>%
+    merge(., SampleIDs %>% dplyr::select(Tube_ID, Visit, PatientID, Group), by = "Tube_ID")
+  
+  percent_diffs <- microbiome_data_metadata %>%
+    group_by(PatientID) %>%
+    summarise(across(all_of(names(microbiome_data_metadata %>% dplyr::select(-c(Tube_ID, Group, Visit, PatientID)))), ~ (.x[Visit == "V3"]/.x[Visit == "V0"]-1)*100)) %>%
+    merge(., SampleIDs %>% dplyr::select(PatientID, Group), by = "PatientID") %>%
+    distinct()
+  
+  #write_csv(percent_diffs, here("data", paste("NAMS_", tax_level, "_percentDiffs_B1.csv", sep = ""))) #fpkm addition only for gmm/gbm processing
+  
+  subtraction_diffs <- microbiome_data_metadata %>%
+    group_by(PatientID) %>%
+    summarise(across(names(microbiome_data_metadata %>% dplyr::select(-c(Tube_ID, Group, Visit, PatientID))), ~ .x[Visit == "V3"]-.x[Visit == "V0"])) %>%
+    merge(., SampleIDs %>% dplyr::select(PatientID, Group), by = "PatientID") %>%
+    distinct()
+  
+  #write_csv(subtraction_diffs, here("data", paste("NAMS_", tax_level, "_subtractionDiffs_B1.csv", sep = ""))) #fpkm addition only for gmm/gbm processing
+}
+
+```
+
+# Diversity check
+
+## Prep diversity data
+```{r Diversity check prep}
+microbiome_data_t_V0 <- microbiome_data_t %>% rownames_to_column("SampleID") %>% filter(SampleID %in% c(SampleIDs %>% filter(Visit == "V0") %>% pull(Tube_ID))) %>% column_to_rownames("SampleID")
+microbiome_data_t_V3 <- microbiome_data_t %>% rownames_to_column("SampleID") %>% filter(SampleID %in% c(SampleIDs %>% filter(Visit == "V3") %>% pull(Tube_ID))) %>% column_to_rownames("SampleID")
+microbiome_data_t_G1 <- microbiome_data_t %>% rownames_to_column("SampleID") %>% filter(SampleID %in% c(SampleIDs %>% filter(Group == "Control") %>% pull(Tube_ID))) %>% column_to_rownames("SampleID")
+microbiome_data_t_G2 <- microbiome_data_t %>% rownames_to_column("SampleID") %>% filter(SampleID %in% c(SampleIDs %>% filter(Group == "ketogenic") %>% pull(Tube_ID))) %>% column_to_rownames("SampleID")
+microbiome_data_t_G3 <- microbiome_data_t %>% rownames_to_column("SampleID") %>% filter(SampleID %in% c(SampleIDs %>% filter(Group == "fasting") %>% pull(Tube_ID))) %>% column_to_rownames("SampleID")
+```
+
+
+## Alpha diversity
+This creates different plots showing the alpha diversity, either its difference or the diversity per time point.
+```{r alphadiv}
+alphadiffs <- diversity_data %>%
+  group_by(PatientID) %>%
+  summarise(across(all_of("diversity_shannon"), ~ (.x[Visit == "V3"]/.x[Visit == "V0"]-1)*100)) %>%
+  merge(., diversity_data %>% dplyr::select(PatientID, Group) %>% unique(), by = "PatientID") %>%
+  mutate(Group = as.factor(Group))
+
+alphadiffs_V0 <- diversity_data %>%
+  filter(Visit =="V0") %>% mutate(Group = as.factor(Group))
+
+adp_diffs <- alpha_div_plot(alphadiffs, "Shannon")
+adp_times <- alpha_div_plot(alphadiffs_V0, "Shannon")
+
+adp_diffs
+#ggsave(here("figures", "alpha_diff_rarefied.pdf"),adp_diffs)
+adp_times
+#ggsave(here("figures", "alpha_diff_rarefied_V0.pdf"),adp_times)
+```
+
+
+### Are differences in alpha diversity significant?
+```{r alphadiv}
+shapiro.test(alphadiffs$diversity_shannon)
+
+# Correlation check
+kruskal.test(diversity_shannon~Group,div)
+dunn_test(div, diversity_shannon~Group)
+```
+
+## Beta diversity
+Choose which visit you want to look at in `visit`. This will create different depictions of the beta diversity at each time point or per group or per patient.
+```{r betaDiv}
+visit = "All" # Can be V0, V3 or All
+
+if (visit == "V0") {
+  braydist <- vegdist (microbiome_data_t_V0, method = "bray", na.rm = T)
+  pcoaE <- data.frame(cmdscale (braydist, k = 2))
+  metadata_pcoa <- merge(SampleIDs %>% filter(Visit == "V0") %>% column_to_rownames("Tube_ID") %>%
+                           dplyr::select(!!group.var, Visit), pcoaE, by = 0)
+} else if (visit == "V3"){
+  braydist <- vegdist (microbiome_data_t_V3, method = "bray", na.rm = T)
+  pcoaE <- data.frame(cmdscale (braydist, k = 2))
+  metadata_pcoa <- merge(SampleIDs %>% filter(Visit == "V3") %>% column_to_rownames("Tube_ID") %>%
+                           dplyr::select(!!group.var, Visit), pcoaE, by = 0)
+
+} else if (visit == "All") {
+  braydist <- vegdist (microbiome_data_t, method = "bray", na.rm = T)
+  pcoaE <- data.frame(cmdscale (braydist, k = 2))
+  metadata_pcoa <- merge(SampleIDs %>% column_to_rownames("Tube_ID") %>% dplyr::select(!!group.var, Visit, PatientID), pcoaE, by = 0)
+  pcoa <- cmdscale(braydist, k = 2, eig = TRUE)
+  pcoa1_pct <- round((pcoa$eig / sum(pcoa$eig))[1] * 100, 1)
+  pcoa2_pct <- round((pcoa$eig / sum(pcoa$eig))[2] * 100, 1)
+  
+  braydist_G1 <- vegdist (microbiome_data_t_G1, method = "bray", na.rm = T)
+  pcoaE_G1 <- data.frame(cmdscale (braydist_G1, k = 2))
+  metadata_pcoa_1 <- merge(SampleIDs %>% column_to_rownames("Tube_ID") %>% dplyr::select(!!group.var, Visit, PatientID), pcoaE_G1, by = 0)
+  
+  braydist_G2 <- vegdist (microbiome_data_t_G2, method = "bray", na.rm = T)
+  pcoaE_G2 <- data.frame(cmdscale (braydist_G2, k = 2))
+  metadata_pcoa_2 <- merge(SampleIDs %>% column_to_rownames("Tube_ID") %>% dplyr::select(!!group.var, Visit, PatientID), pcoaE_G2, by = 0)
+  
+  braydist_G3 <- vegdist (microbiome_data_t_G3, method = "bray", na.rm = T)
+  pcoaE_G3 <- data.frame(cmdscale (braydist_G3, k = 2))
+  metadata_pcoa_3 <- merge(SampleIDs %>% column_to_rownames("Tube_ID") %>% dplyr::select(!!group.var, Visit, PatientID), pcoaE_G3, by = 0)
+}
+
+bdp_all <- beta_div_plot(metadata_pcoa, limits = c(-0.4,0.4), "per_group")
+bdp_all2 <- beta_div_plot_2(metadata_pcoa)
+bdp_group <- beta_div_plot(metadata_pcoa_3, limits = c(-0.5,0.5), "per_visit")
+
+star_plot <- star_plot_Sofia(metadata_pcoa %>% mutate(PatientID = str_remove(PatientID, "NAMS0")))
+star_plot2 <- star_plot_diffs(metadata_pcoa %>% mutate(PatientID = str_remove(PatientID, "NAMS0")))
+#ggsave(here("figures", "betadiversity_centered_starplot_genus.pdf"), star_plot2, width = 7)
+
+star_plot2
+
+#ggsave(here("figures", "betadiversity_starplot_centered.pdf"), star_plot2)
+```
+
+### Are differences in beta diversity significant?
+```{r betaDiv}
+if(visit == "V0") {
+  adonis2 (microbiome_data_t_V0 ~ Group, metadata_pcoa, dist = "bray")
+}else if(visit == "V3") {
+  adonis2 (microbiome_data_t_V3 ~ Group, metadata_pcoa, dist = "bray")
+} else if(visit == "All") {
+  adonis2 (microbiome_data_t ~ Visit * Group, metadata_pcoa, dist = "bray", strata = metadata_pcoa$PatientID, by = "terms")
+  adonis2 (microbiome_data_t_G1 ~ Visit, metadata_pcoa_1, dist = "bray")
+  adonis2 (microbiome_data_t_G2 ~ Visit, metadata_pcoa_2, dist = "bray")
+  adonis2 (microbiome_data_t_G3 ~ Visit, metadata_pcoa_3, dist = "bray")
+}
+
+```
+
+
+
+# DropOut Analysis 
+
+## Load Data of drop out sample sequencing
+```{r DropOut analysis alpha diversity}
+div2 <- read_csv(here("data", "Rarefied_alpha_diversity_B2.csv")) %>% dplyr::select(-Group, -PatientID)
+
+SampleIDs2 <- read.csv(here("data", "SampleIDs_DropOuts_V0_wTubeID.csv"), stringsAsFactors = F) %>%
+  rename(Sample.Identification = Sample_Number)
+ 
+div2 <- merge(div2 , SampleIDs2 %>% dplyr::select(Group, Tube_ID, PatientID), by = "Tube_ID")
+
+B1_B2_divs <- rbind(div %>% mutate(Group = factor(case_when(
+    Group == 1 ~ "Control group",
+    Group == 2 ~ "ketogenic diet",
+    Group == 3 ~ "fasting diet",
+    TRUE ~ as.character(Group)
+  ), levels = c("Control group", "ketogenic diet", "fasting diet"))) %>% filter(Visit == "V0") %>% mutate(DropOut = 0), div2 %>% mutate(DropOut = 1)) %>%
+  mutate(DropOut = as.factor(DropOut))
+```
+
+## Check Alpha Diversity of drop out samples
+This creates plots of the alpha diversity of drop out samples and both, drop out and per-protocol patients. Also, the correlation between all combinations can be calculated separately below - for this, the respective time point and group have to be manually adjusted in the code.
+```{r DropOut analysis alpha diversity}
+adp_diffs2 <- alpha_div_plot(div2, "Shannon")
+alpha_div_plot(B1_B2_divs, "Shannon")
+
+adp_diffs2 <- B1_B2_divs %>%
+  ggplot(aes(Group, diversity_shannon, color = Group, fill = as.factor(DropOut))) +
+  geom_boxplot(outlier.shape = NA, position = position_dodge(width = 0.9)) +
+    geom_point(position = position_dodge(width = 0.9)) +
+    scale_colour_manual(values = group_palette) +
+    scale_fill_grey(start = 0.5, end = 0.9) +
+    theme_classic() +
+    theme(axis.text.x = element_text(size = 7, angle = 45, hjust = 1),
+          axis.text.y = element_text(size = 7, angle = 0, hjust = 1, vjust = 0)) +
+    ylab("Shannon Diversity")
+
+adp_diffs2
+#ggsave(here("figures", "alpha_diff_B1B2_rarefied.pdf"), adp_diffs2, width = 10)
+
+
+# Correlation check
+kruskal.test(diversity_shannon~DropOut,B1_B2_divs %>% filter((Group == "Control group" & DropOut == "0")| (Group == "ketogenic diet" & DropOut == "1")))
+dunn_test(div2, diversity_shannon~Group)
+```
+
+## Impute diversities
+This uses mice to impute the alpha diversity at timepoint 9 months for drop out samples based on the values taken from the per-protocol patients.
+```{r DropOut impute diversities}
+B1_B2_divs_impute <- rbind(div %>% mutate(Group = factor(case_when(
+    Group == 1 ~ "Control group",
+    Group == 2 ~ "ketogenic diet",
+    Group == 3 ~ "fasting diet",
+    TRUE ~ as.character(Group)
+  ), levels = c("Control group", "ketogenic diet", "fasting diet"))) %>% mutate(DropOut = 0), div2 %>% mutate(DropOut = 1)) %>%
+  mutate(DropOut = as.factor(DropOut)) %>%
+  dplyr::select(PatientID,Visit,DropOut,Group, diversity_shannon) %>%
+  spread(Visit, diversity_shannon)
+
+predictor_matrix <- matrix(0,nrow = ncol(B1_B2_divs_impute), ncol = ncol(B1_B2_divs_impute))
+predictor_matrix[c(4,5),c(2:5)] <- 1 #Use information on drop_out, intervention and diversity at both time points to create a model used for imputation
+diag(predictor_matrix) <- 0
+imp <- mice(B1_B2_divs_impute, method = "pmm", maxit = 100, predictorMatrix = predictor_matrix, allow.na = TRUE)
+B1_B2_divs_full <- mice::complete(imp)
+B1_B2_divs_full_wpercent <- B1_B2_divs_full %>% mutate(Change = ((V3/V0)-1)*100)
+```
+
+
+### Plot imputed diversity results
+Creates a depiction of the change in alpha diversity per group and whether the patient dropped out or not. 
+```{r Plot imputed values}
+adp_diffs3 <- B1_B2_divs_full_wpercent %>%
+  ggplot(aes(Group, Change, color = Group, fill = as.factor(DropOut))) +
+  geom_boxplot(outlier.shape = NA, position = position_dodge(width = 0.9)) +
+    geom_point(position = position_dodge(width = 0.9)) +
+    scale_colour_manual(values = group_palette) +
+    scale_fill_grey(start = 0.5, end = 0.9) +
+    theme_classic() +
+    theme(axis.text.x = element_text(size = 7, angle = 45, hjust = 1),
+          axis.text.y = element_text(size = 7, angle = 0, hjust = 1, vjust = 0)) +
+    ylab("Shannon Diversity")
+
+adp_diffs3
+#ggsave(here("figures", "alpha_diff_change_imputed.pdf"), adp_diffs3, width = 10)
+
+
+# Correlation check
+dunn_test(B1_B2_divs_full_wpercent, Change~Group)
+```
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,331 @@
+---
+title: "NAMS_Association_and_deconfounding_analysis"
+output: html_document
+---
+
+Set up the document (these documents are not meant to be knitted, Markdown is mainly used for structure)
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("2_DIff_diversity.R", local = knitr::knit_global())
+source("Plots.R", local = knitr::knit_global())
+source("Packages.R", local = knitr::knit_global())
+source("Functions.R", local = knitr::knit_global())
+```
+
+# Load Data
+
+## Load feature data
+Set `tax.level` so the correct file is chosen and the plot is saved with that name. Also choose which `type` of analysis you want to run and which `matrix` was used which is only relevant for `type == "metabolomics"`. This will create a data frame with feature data per patient and one with tryptophan ratios if `type == "metabolomics" & matrix == "serum"`. Also, relevant features will be assigned from different backgrounds depending on the analysis that should follow, so as to perform this analysis as a post hoc test.
+```{r feature data}
+tax_level <- "gmms" #choose e.g. "Species", "Phylum", "mOTUs_ID" or "gmms"/"gbms"/"functional"
+type <- "metabolomics" # choose "microbiome", "metabolomics" or "outcome".
+matrix <- "serum" # choose either "stool" or "serum"
+
+if (type == "microbiome") {
+  if(tax_level == "gmms" | tax_level == "gbms") {
+    microbiome_data <- read_csv(here("data", paste(tax_level,"NAMS_filtered_B1_fpkm.csv", sep = "_"))) %>%
+      column_to_rownames(1)
+    relevant_features <- read_rds(here("data", paste(tax_level, "_InteractionCheck_fpkm_adj.RDS", sep = "")))$Status %>%
+        filter(Group == "Deconfounded") %>%
+        pull(Feature)
+  } else {
+    microbiome_data <- read_csv(here("data", paste(tax_level,"NAMS_filtered_B1.csv", sep = "_"))) %>%
+      column_to_rownames("Feature")
+  }
+  if (tax_level == "Genus") {
+    relevant_features <- readRDS(here("data", "univariate_interaction_gmms_Genus.RDS"))$Qs %>%
+      filter(if_any(!Feature, ~. < 0.1)) %>%
+      dplyr::select(Feature, where(~ any(. < 0.1))) %>%
+      pull(Feature)
+  } else {
+    relevant_features <- rownames(microbiome_data)
+  }
+} else {
+  if(type == "metabolomics" & matrix == "serum"){
+    metabolomics_data <- readRDS(here("data", "NAMS_Serum_AreaNormISTD_data.RDS"))
+    Trp_data <- metabolomics_data %>% dplyr::select(-c(X3_Hydroxy_butyric_acid, Hydroxy_methyl_butyric_acid, Acetoacetic_acid,
+                                                             Hexanoic_acid))
+    metrics <- names(Trp_data %>% dplyr::select(-c(starts_with("Sample"), starts_with("Batch"), tryptophan)))
+    Trp_ratios <- Trp_data %>%
+      mutate(across(all_of(metrics), ~ .x / tryptophan, .names = "{.col}_over_Trp")) %>%
+      dplyr::select(Sample.Identification, ends_with("over_Trp"))
+
+  } else if (type == "metabolomics" & matrix == "stool") {
+    metabolomics_data <- readRDS(here("data", "NAMS_Stool_AreaNormISTD_data.RDS"))
+  }
+}
+
+if(tax_level == "Species") {
+  result_outcome_species <- readRDS(here("data", "LesionAssocSpecies_following_gmms_in_Group.RDS"))
+  outcome_assoc_species <- result_outcome_species$Qs %>%
+    filter(if_any(!Feature, ~. < 0.1)) %>%
+    dplyr::select(Feature, where(~ any(. < 0.1))) %>%
+    pull(Feature)
+}
+
+group_palette <- c("#117733", "#661100", "#332288")
+```
+
+
+## Load Metadata
+`irrelevant.vars` will deleted from the metadata in the rest of the analysis. `use.shannon` will use the metadata that includes variables about the microbial diversity. `use.nutri` will add all nutritional variables to the metadata. This will create a metadata frame with all variables per sample (so per patient over both visits).
+```{r Load Metadata}
+irrelevant.vars <- c("lab_bhb.v0", "lab_bhb.v3", "lab_bhb.absdiff", "lab_bhb.percdiff", "lab_bhb", "DMM_A", "msfc_t25fw_trial2", "msfc_z_score_t25fw", "msfc_average_hpt_domndom", "msfc_neu_z_score_hpt")
+use.shannon <- T #should the metadata include the shannon diversity and beta diversity axes? This will limit the number of samples in the analysis, so it may not be good to use for metabolomics tests that comprise more samples.
+use.nutri <- F #should the metadata include nutritional values?
+DMT_only <- T #should only whether or not a DMT was taken be included or also the different DMTs?
+
+SampleIDs <- read.csv(here("data", "SampleIDs_PerProtocol_V1V3.csv"), stringsAsFactors = F) %>%
+  rename(Sample.Identification = Sample_Number) %>%
+  mutate(Group = factor(case_when(
+    Group == 1 ~ "Control group",
+    Group == 2 ~ "ketogenic diet",
+    Group == 3 ~ "fasting diet",
+    TRUE ~ as.character(Group)
+  ), levels = c("Control group", "ketogenic diet", "fasting diet"))) %>%
+  mutate(Visit = as.factor(Visit))
+
+if (DMT_only) {
+  ms_meds <- read.csv(here("data", "MS_meds_clean.csv"), stringsAsFactors = T) %>%
+    dplyr::select(PatientID, No_DMT)
+} else {
+  ms_meds <- read.csv(here("data", "MS_meds_clean.csv"), stringsAsFactors = T)
+}
+
+
+if(use.shannon == TRUE) {
+  metadata <- read.csv(here("data", "NAMS_Metadata_for_analysis_long_wDiv_filtered_gmmsfpkm.csv"), stringsAsFactors = T) %>%
+    dplyr::select(-X)
+} else {
+  metadata <- read.csv(here("data", "NAMS_Metadata_for_analysis_long_filtered.csv"), stringsAsFactors = T) %>%
+    dplyr::select(-X)
+}
+
+if(use.nutri == F) {
+  metadata <- metadata %>%
+    dplyr::select(-starts_with("nutri_"))
+}
+
+metadata <- metadata %>%
+  dplyr::select(-any_of(irrelevant.vars)) %>%
+  merge(ms_meds, by = "PatientID")
+
+```
+
+
+#Interaction check
+
+## Prepare data
+If `analysis_type` is `biological`, metabolomics or microbiome results will be prepared, otherwise (if `analysis_type` is `outcomes`) NAMS outcomes such as lesion volume will be analysed. `Trp_ratio_calc` will use the ratios of serum metabolites over serum tryptophan (calculated above) for the following analysis. This chunk will create data frames that can be used for analysis, so with matched Patient IDs etc. One can select only relevant features in the code and also limit the covariates data frame and the features data further in the chunk itself by adding and removing hashtags as indicated below.
+
+```{r prep files}
+analysis_type = "biological" #can be biological or outcomes
+Trp_ratio_calc = F
+
+
+covariates_data <- metadata %>% 
+    dplyr::select(all_of("Visit"), everything()) %>%
+    rename(Status = 1) %>%
+    mutate(across(1, ~ recode(., `1`= 0L, `2`=1L, V0 = 0L, V3 = 1L))) %>%
+    column_to_rownames("Sample.Identification") %>%
+    mutate(PatientID = as.factor(PatientID))
+
+if (analysis_type == "biological") {
+  if(type == "metabolomics") {
+    if (Trp_ratio_calc == T) {
+      features_data <- Trp_ratios %>%
+        mutate(Sample.Identification = paste("S", Sample.Identification, sep = "")) %>%
+        column_to_rownames("Sample.Identification") %>%
+        dplyr::select(-starts_with("Batch"), -starts_with("Sample.Type"))
+      } else {
+    features_data <- metabolomics_data %>%
+      mutate(Sample.Identification = paste("S", Sample.Identification, sep = "")) %>%
+      column_to_rownames("Sample.Identification") %>%
+      dplyr::select(-starts_with("Batch"), -starts_with("Sample.Type"))
+      }
+  } else if (type == "microbiome") {
+    features_data <- data.frame(t(microbiome_data))
+  }
+} else if (analysis_type == "outcomes") {
+  features_data <- covariates_data %>%
+    dplyr::select(contains(c("_igf_", "NFL", "mri_t2", "lesions", "edss", "rlps_yn", "msfc_z_score_pasat", "bdi2_score_corrected")),-contains(".v5"))
+  
+  covariates_data <- covariates_data %>%
+    dplyr::select(-contains(c("_igf_", "NFL", "mri_t2", "lesions", "edss", "rlps_yn", "msfc_z_score_pasat", "bdi2_score_corrected")),-contains(".v5"))
+}
+
+covariates_data <- covariates_data %>%
+  #filter(Group == "ketogenic diet" | Group == "Control group") %>%
+  #dplyr::select(contains(c("_igf_", "NFL", "mri_t2", "lesions", "edss", "bdi2_score_corrected", "Group", "Status", "PatientID")),-contains(".v5")) %>%
+  slice(match(rownames(features_data), rownames(.)))
+
+features_data <- features_data %>% slice(match(rownames(covariates_data), rownames(.))) #%>%
+  #dplyr::select(all_of(outcome_assoc_species))
+  #dplyr::select(c(Acetoacetic_acid, X3_Hydroxy_butyric_acid))
+  #dplyr::select(-c(Acetoacetic_acid, Hexanoic_acid, Hydroxy_methyl_butyric_acid, X3_Hydroxy_butyric_acid))
+  #dplyr::select(c(glycerol.degradation.III, propionate.production.II, starch.degradation,sucrose.degradation.II))
+  #dplyr::select(Acetic_acid, Propanoic_acid, Butyric_acid)
+  #dplyr::select(tryptophan, Kynurenine)
+```
+
+## Model check
+You can choose the p-value limit that is used to evaluate a significant association in `p_limit` and choose a method for p-value adjustment in `p_adj_method`. `save_result` will save the result. This will check whether a feature is associated with the group and whether this relationship is confounded. The result is a list with 4 data frames: p-values, adjusted p-values, effect sizes and confounding status.
+```{r Intertwined anaylsis}
+# Ensure that 'PatientID' is a factor and 'Timepoint' is a binary variable in covariates_data
+p_limit <- 0.05
+q_limit <- 0.1
+p_adj_method <- "fdr"
+save_result <- F
+
+if(analysis_type == "outcomes") {
+  type = "outcome"
+}
+
+result <- interaction_deconf(features_data, covariates_data %>% dplyr::select(-contains(c(".v5", "mri_pbvc"))), q_limit, p_limit, p_adj_method, type = type)
+
+if(p_adj_method == "none") {
+  end_phrase <- ("unadj.RDS")
+} else {
+  end_phrase <- ("adj.RDS")
+}
+
+if (save_result) {
+    if(type == "metabolomics") {
+    saveRDS(result, here("data", paste(c(type, matrix, "_InteractionCheck", end_phrase), collapse = "_")))
+  } else if(type == "microbiome") {
+    saveRDS(result, here("data", paste(c(tax_level, "InteractionCheck", end_phrase), collapse = "_")))
+  }
+}
+
+result$Status %>% filter(Group == "Deconfounded")
+result$Qs %>%
+  #dplyr::filter(Group < 0.11) %>%
+  dplyr::select(Feature, where(~ any(. < 0.1)))
+
+result$Ds
+```
+
+### Plot interaction results as heatmap
+Give the width of the saved heatmap in `width`. You can adjust some plot parameters in the `Interaction_Heatmap2` function in the code chunk directly. `save_result` will save the result.
+```{r plot interaction}
+width = 7
+save_result <- F
+
+heatmap_results <- Interaction_Heatmap2(result, p_limit = 0.1, q_cutoff = 0.1, star_size = 5, x_axis_size = 8, y_axis_size = 8, p_adj_method = p_adj_method, cor_limits = c(0,0.25))
+
+heatmap_results
+
+if(p_adj_method == "none") {
+  end_phrase <- ("unadj.pdf")
+} else {
+  end_phrase <- ("adj.pdf")
+}
+
+if (save_result) {
+    if(type == "metabolomics") {
+    ggsave(here("figures", paste(c(type, matrix, "_InteractionHeatmap", end_phrase), collapse = "_")), heatmap_results, width = width)
+  } else if(type == "microbiome") {
+    ggsave(here("figures", paste(c(tax_level, "InteractionHeatmap", end_phrase), collapse = "_")), heatmap_results, width = width)
+  }
+}
+
+```
+
+
+## Model check for changes independent of the group
+This will model the feature over time and test the predictive power of time as a variable. Then all covariates are individually added and tested for confounding just like above. The Group variable, if part of `covariates_data`, will also be tested like that. You can choose the p-value limit that is used to evaluate a significant association in `p_limit` and choose a method for p-value adjustment in `p_adj_method`. `save_result` will save the result. Ensure that 'PatientID' is a factor and 'Timepoint' is a binary variable in covariates_data.
+```{r Intertwined anaylsis}
+p_limit <- 0.1
+p_adj_method <- "fdr"
+save_result <- F
+
+result_visit <- interaction_deconf_visit(features_data, covariates_data %>% dplyr::select(-contains(c(".v5", "mri_pbvc"))), p_limit, p_adj_method, type = type)
+
+if(p_adj_method == "none") {
+  end_phrase <- ("unadj.RDS")
+} else {
+  end_phrase <- ("adj.RDS")
+}
+
+if (save_result) {
+    if(type == "metabolomics") {
+    saveRDS(result_visit, here("data", paste(c(type, matrix, "InteractionCheck_Visit", end_phrase), collapse = "_")))
+  } else if(type == "microbiome") {
+    saveRDS(result_visit, here("data", paste(c(tax_level, "fpkm_InteractionCheck_Visit", end_phrase), collapse = "_")))
+  }
+}
+
+result_visit$Qs %>% select(Feature, Status)
+```
+
+## Model check outcome specific
+This tests whether the association between Feature and Outcome differs across groups and time. NAs are created for effect size, if the estimate couldn't be calculated for that comparison. For this, the outcome variable in response to the three-way interaction between group, time, and feature is modelled while accounting for inter-patient variability. Only the three-way interaction term is tested for significance in a Chi-squared test with the reference level chosen in `reference_level`. You can choose a method for p-value adjustment in `p_adj_method`. Any changes in the resulting plot and where is should be stored need to be adjusted in the code chunk.
+```{r Intertwined anaylsis}
+p_adj_method <- "none"
+features_data_outcome <- features_data %>% select("glycerol.degradation.III", "propionate.production.II", "starch.degradation", "sucrose.degradation.II")
+covariates_data_outcome <- covariates_data %>% dplyr::select(Status, PatientID, Group,contains(c("_igf_", "NFL", "mri_t2", "sdmt", "bdi2_score_corrected")),-contains(".v5"))
+reference_level <- "ketogenic diet"
+
+result_future <- interaction_outcome_deconf(features_data_outcome, covariates_data_outcome, p_adj_method, feature_type = type, cov_type = "covariates", reference_level = reference_level, other_variables = c("bmi", "info_gender.factor", "No_DMT", "visit_age", "lesion_load"))
+
+result_future$Qs <- data.frame(result_future$Ps) %>%
+  gather(Genus, P, -Feature) %>%
+  mutate(across(P, ~ p.adjust(., method = "fdr"))) %>%
+  spread(Genus, P)
+
+#saveRDS(result_future, here("data", "for_paper", "Species_outcome_threefoldInteraction.RDS"))
+
+result_future$Qs %>%
+  dplyr::select(Feature, where(~ any(. < 0.1))) %>%
+  filter(if_any(everything(), ~ . < 0.1))
+
+result_future
+
+outcome_plot <- future_assoc_bars(result_future, filter = T, y.limits = c(-0.3, 0.3))
+#ggsave(here("figures", "AaPaBa_LesionVol_threefoldInteraction.pdf"), width = 10)
+```
+
+##OPTIONAL Read in interaction calculation results
+One can read in results here in case one does not want to rerun the entire skript above.
+```{r read in previous result}
+result <- read_rds(here("data", "Order_InteractionCheck_adj.RDS"))
+result$Status %>%
+  filter(Group == "Deconfounded")
+result$Qs
+```
+
+## Post hoc tests
+
+### Post hoc test using estimated marginal means
+If there is a significant Group association for a feature, this calculates how the groups differ in their relationship to that feature. The result will give the p-Value and the estimate as well as a plot. The upper panel to this plot (Rho for group and lesion volume) can be found in the visualize results file.
+```{r post hoc tests}
+width = 10
+save_result <- F
+
+post_hoc_results <- Interaction_posthoc_plot(result_list = result, type = type)
+#post_hoc_results <- Interaction_posthoc_plot_outcome(result = result_future, features_data = features_data, covariates_data = covariates_data, outcome_name = "mri_t2vall", type = "microbiome")
+
+post_hoc_results$result_df
+post_hoc_results$result_plot
+
+
+if(p_adj_method == "none") {
+  end_phrase <- ("unadj.pdf")
+} else {
+  end_phrase <- ("adj.pdf")
+}
+
+if (save_result) {
+    if(type == "metabolomics") {
+    ggsave(here("figures", paste(c(type, matrix, "PosthocDotplot", end_phrase), collapse = "_")), post_hoc_results$result_plot, width = width)
+  } else if(type == "microbiome") {
+    ggsave(here("figures", paste(c(tax_level, "fpkm_PosthocDotplot_estimate_included", end_phrase), collapse = "_")), post_hoc_results$result_plot, width = width)
+  }
+}
+plot
+```
+
+
+
+
+

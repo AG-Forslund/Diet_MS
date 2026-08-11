@@ -1,0 +1,303 @@
+---
+title: "NAMS_change_dependence_on_baseline_analysis"
+output: html_document
+---
+
+Set up the document (these documents are not meant to be knitted, Markdown is mainly used for structure)
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("Plots.R", local = knitr::knit_global())
+source("Packages.R", local = knitr::knit_global())
+source("Functions_NAMS_Difference_Analysis.R", local = knitr::knit_global())
+```
+
+# Load Data
+
+## Load Metadata
+`irrelevant.vars` will deleted from the metadata in the rest of the analysis. `use.shannon` will use the metadata that includes variables about the microbial diversity. `use.nutri` will add all nutritional variables to the metadata. This will create a metadata frame with all variables per patient for each, the baseline visit and the 9 months follow up visit.
+```{r Load Metadata}
+irrelevant.vars <- c("lab_bhb.v0", "lab_bhb.v3", "lab_bhb.absdiff", "lab_bhb.percdiff", "lab_bhb", "DMM_A")
+use.shannon <- F #should the metadata include the shannon diversity and beta diversity axes? This will limit the number of samples in the analysis, so it may not be good to use for metabolomics tests that comprise more samples.
+use.nutri <- F #should the metadata include nutritional values?
+
+#Load sampleIDs
+SampleIDs <- read.csv(here("data", "SampleIDs_PerProtocol_V1V3.csv"), stringsAsFactors = F) %>%
+  rename(Sample.Identification = Sample_Number) %>%
+  mutate(Group = factor(case_when(
+    Group == 1 ~ "Control group",
+    Group == 2 ~ "ketogenic diet",
+    Group == 3 ~ "fasting diet",
+    TRUE ~ as.character(Group)
+  ), levels = c("Control group", "ketogenic diet", "fasting diet"))) %>%
+  mutate(Visit = as.factor(Visit))
+
+if(use.shannon == TRUE) {
+  metadata <- read.csv(here("data", "NAMS_Metadata_for_analysis_allDiffs_wDiv_filtered.csv"), stringsAsFactors = T) %>%
+    dplyr::select(-X)
+} else {
+  metadata <- read.csv(here("data", "NAMS_Metadata_for_analysis_allDiffs_filtered.csv"), stringsAsFactors = T) %>%
+    dplyr::select(-X)
+}
+
+if(use.nutri == F) {
+  metadata <- metadata %>%
+    dplyr::select(-starts_with("nutri_"))
+}
+
+metadata <- metadata %>%
+  dplyr::select(-any_of(irrelevant.vars))
+
+```
+
+
+## Load biological data
+Set `tax.level` so the correct file is chosen and the plot is saved with that name. Also choose which `type` of analysis you want to run and which `probe` was used which is only relevant for `type == "metabolomics"`. If `filter_features` only group-associated gmms will be used. In `difference.metric` one can choose which kind of difference should be used in the following analysis, which is only relevant for `type == "metabolomics"`. If only a few GMMs are interesting, set `filter_features`to `TRUE` and choose the correct GMMs as `relevant_features` in the code below. This will create a data frame with feature differences per patient.
+```{r Biological Data}
+type <- "metabolomics" #can be metabolomics or microbiome
+probe <- "serum" #important for Metabolomics feature space, can be stool or serum
+tax_level <- "Genus" #Can be Phylum, Class etc., "gmms" or "gbms"
+filter_features <- TRUE  # only relevant for gmms
+difference.metric <- "percent" #can be either subtraction or percent, important only for metagenomics and serum metabolomics data
+relevant_features <- c("propionate.production.II", "glycerol.degradation.I")
+
+if(type == "metabolomics") {
+  if(probe == "stool"){
+    metabolomics_diffs <- read.csv(here("data", "Area_NAMS_Stool_percentDiffs.csv"), header = TRUE) %>%
+      rename_with(~paste0(., "_Diff"), .cols = where(is.numeric))
+    metabolomics_data_raw <- readRDS(here("data", "NAMS_Stool_AreaNormISTD_data.RDS"))
+  } else {
+    if (difference.metric == "subtraction") {
+      metabolomics_diffs <- read.csv(here("data", "Area_NAMS_Serum_absoluteDiffs.csv"), header = TRUE) %>%
+        rename_with(~paste0(., "_Diff"), .cols = where(is.numeric))
+    } else {
+      metabolomics_diffs <- read.csv(here("data", "Area_NAMS_Serum_percentDiffs.csv"), header = TRUE) %>%
+        rename_with(~paste0(., "_Diff"), .cols = where(is.numeric)) %>%
+        mutate(across(all_of(grep("_Diff", names(metabolomics_diffs), value = TRUE)), ~ log(1 + .x / 100)))
+    }
+    metabolomics_data_raw <- readRDS(here("data", "NAMS_Serum_AreaNormISTD_data.RDS"))
+  }
+  
+  bio_data <- metabolomics_data_raw %>%
+    mutate(Tube_ID = paste("S", Sample.Identification, sep = "")) %>%
+    merge(., SampleIDs %>% select(Visit, Tube_ID, PatientID), by ="Tube_ID") %>%
+    filter(Visit == "V0") %>%
+    dplyr::select(-starts_with("Batch"), -starts_with("Sample.Type"), -Visit, -Tube_ID, -Sample.Identification) %>%
+    rename_with(~paste0(., "_Base"), .cols = where(is.numeric)) %>%
+    merge(., metabolomics_diffs, by = "PatientID")
+  
+
+} else {
+  if (difference.metric == "subtraction") {
+    file_name <- paste("NAMS_", tax_level, "_subtractionDiffs_B1.csv", sep = "")
+  } else {
+     file_name <- paste("NAMS_", tax_level, "_percentDiffs_B1.csv", sep = "")
+  }
+  
+  microbiome_diffs <- read.csv(here("data", file_name), header = TRUE) %>%
+    rename_with(~paste0(., "_Diff"), .cols = where(is.numeric))
+  
+  if(tax_level == "gmms" |tax_level == "gbms") {
+    microbiome_data_raw <- data.frame(t(read_csv(here("data", paste(tax_level,"NAMS_filtered.csv", sep = "_"))) %>%
+                                          column_to_rownames("Feature")))
+    if(filter_features) {
+      microbiome_data_raw <- microbiome_data_raw %>% dplyr::select(all_of(relevant_features))
+      microbiome_diffs <- microbiome_diffs %>% dplyr::select(PatientID, Group, all_of(paste(relevant_features, "_Diff", sep="")))
+    }
+    
+  } else {
+    microbiome_data_raw <- data.frame(t(read_csv(here("data", paste(tax_level,"NAMS_filtered_B1.csv", sep = "_"))) %>%
+                                          column_to_rownames("Feature")))
+  }
+  
+  bio_data <- microbiome_data_raw %>%
+    rename_with(~paste0(., "_Base"), .cols = where(is.numeric)) %>%
+    rownames_to_column("Tube_ID") %>%
+    merge(., SampleIDs %>% select(Visit, Tube_ID, PatientID), by ="Tube_ID") %>%
+    filter(Visit == "V0") %>%
+    merge(., microbiome_diffs, by = "PatientID") %>%
+    select(-Tube_ID, -Visit)
+}
+```
+
+
+## Load colors
+```{r colors}
+group_palette <- c("#117733", "#661100", "#332288")
+```
+
+# Simple baseline group association
+Are baseline values of these features sig. different between diet groups? This just does a simple Kruskal-Wallis test for all features in the loaded biological data and adjusts the p-value.
+```{r basline group association}
+analysis_data <- bio_data %>%
+  column_to_rownames("PatientID") %>%
+  select(contains(c("_Base")), Group)
+
+numeric_cols <- names(analysis_data)[sapply(analysis_data, is.numeric)]
+
+# Calculate eta squared for each feature
+p_values <- sapply(numeric_cols, function(col) {
+  formula <- as.formula(paste(col, "~ Group"))
+  kruskal.test(formula, data = analysis_data)$p.value
+})
+
+q_values <- p.adjust(p_values, method = "fdr")
+
+p_values
+q_values
+```
+
+#Interaction check
+
+## Prepare data
+If `analysis_type` is `biological`, metabolomics or microbiome results will be prepared, otherwise NAMS outcomes such as lesion volume will be analysed. In case one looks at metabolites, one can choose which metabolites should be included in `metabolites_posthoc`. One might need to adjust the ending, depending on whether percent changes were used or subtraction. This will create data frames that can be used for analysis, so that match Patient IDs etc.
+```{r prep files}
+analysis_type = "biological" #can be biological or outcomes
+metabolites_posthoc <- c("Acetoacetic_acid", "Hydroxy_methyl_butyric_acid", "X3_Hydroxy_butyric_acid", "Hexanoic_acid")
+
+metabolites_posthoc_full <- c(paste0(metabolites_posthoc, "_Base"), paste0(metabolites_posthoc, "_Diff"))
+
+if (analysis_type == "biological") {
+  covariates_data <- metadata %>% 
+    column_to_rownames("PatientID") %>%
+    select(-contains(".v"))
+  
+  features_data <- bio_data %>% 
+    column_to_rownames("PatientID") %>%
+    dplyr::select(all_of(metabolites_posthoc_full))
+} else if (analysis_type == "outcomes") {
+  covariates_data <- metadata %>% 
+    column_to_rownames("PatientID") %>%
+    dplyr::select(-contains(".v"))
+
+  features_data <- metadata %>% 
+    dplyr::select(contains(c("PatientID", "_igf_", "NFL", "mri_t2", "lesion", "shannon"))) %>%
+    column_to_rownames("PatientID") %>%
+    rename_with(~gsub("\\.v0$", "_Base", .x), ends_with(".v0"))
+  
+  if(difference.metric == "percent") {
+    features_data <- features_data %>%
+      rename_with(~gsub("\\.percdiff$", "_Diff", .x), ends_with(".percdiff")) %>%
+      dplyr::select(contains(c("_Base", "_Diff")), -starts_with("lesion_load"))
+  } else {
+    features_data <- features_data %>%
+      rename_with(~gsub("\\.absdiff$", "_Diff", .x), ends_with(".absdiff")) %>%
+      dplyr::select(contains(c("_Base", "_Diff")), -starts_with("lesion_load"))
+  }
+}
+
+covariates_data <- covariates_data %>%
+  slice(match(rownames(features_data), rownames(.)))
+
+features_data <- features_data %>%
+  slice(match(rownames(covariates_data), rownames(.)))
+
+features <- str_remove(names(features_data %>% select(contains("Base"))), "_Base")
+```
+
+## Model check
+You can choose the p-value limit that is used to evaluate a significant association in `p_limit` and choose a method for p-value adjustment in `p_adj_method`. This will check whether a change in a feature depends on its baseline values and display the results below.
+```{r Intertwined anaylsis}
+p_limit <- 0.1
+p_adj_method <- "fdr"
+
+result <- interaction_deconf(features_data, covariates_data %>% dplyr::select(-contains(c(".v5", "mri_pbvc", "scrn_ethnicity.factor"))), p_limit, p_adj_method, features, type = type, analysis_type = analysis_type)
+
+result$Qs %>%
+  dplyr::filter(Group < 0.1)
+
+result$Ds
+
+result$Status
+```
+
+
+## Plot model check and check significance
+Currently, I let all four SCFAs & keto bodies run seperately, gather the slopes and then concatenate everything to p-adjust. 
+```{r plot interaction}
+variable_interaction_analysis <- "X3_Hydroxy_butyric_acid"
+
+var_base <- paste0(variable_interaction_analysis, "_Base", sep="")
+var_diff <- paste0(variable_interaction_analysis, "_Diff", sep="")
+
+if(analysis_type == "outcomes") {
+  
+  if(difference.metric == "percent") {
+    model_data <- metadata %>% 
+      rename_with(~gsub("\\.v0$", "_Base", .x), ends_with(".v0")) %>%
+      rename_with(~gsub("\\.percdiff$", "_Diff", .x), ends_with(".percdiff")) %>%
+      select(PatientID, Group, contains(c("_Base", "_Diff")), -starts_with("lesion_load"))
+  } else {
+    model_data <- metadata %>% 
+      rename_with(~gsub("\\.v0$", "_Base", .x), ends_with(".v0")) %>%
+      rename_with(~gsub("\\.absdiff$", "_Diff", .x), ends_with(".absdiff")) %>%
+      select(PatientID, Group, contains(c("_Base", "_Diff")), -starts_with("lesion_load"))
+  }
+  
+} else if (analysis_type == "biological") {
+  
+  if (type == "microbiome") {
+    model_data <- bio_data %>%
+      mutate("{var_base}" := rank(!!sym(var_base))) %>%
+      mutate("{var_diff}" := rank(!!sym(var_diff)))
+  } else {
+    model_data <- bio_data %>%
+      mutate("{var_base}" := log(!!sym(var_base))) %>%
+      mutate("{var_diff}" := !!sym(var_diff))
+    }
+
+  model_data$Group <- relevel(as.factor(model_data$Group), ref = "Ketogenic Diet")
+  
+}
+
+model_form <- as.formula(paste0(var_diff, "~", var_base, "*Group"))
+fiti <- glm(model_form, data = model_data)
+slopes <- sim_slopes(fiti, pred = Group, modx = !!sym(var_base))
+
+plot <- interact_plot(fiti, pred = Group, modx = !!sym(var_base), plot.points = TRUE, point.size = 5, point.alpha = 0.4, line.thickness = 3)
+plot2 <- interact_plot(fiti, pred = !!sym(var_base), modx = Group, plot.points = TRUE)
+
+#slopes
+#cat_plot(fiti, pred = Group, modx = !!sym(var_base), plot.points = TRUE, point.size = 5, point.alpha = 0.4, line.thickness = 3)
+
+plot + scale_color_viridis_c(option = "plasma", begin = 0, end = 1, limits = c(3,9)) + theme_classic()
+#plot2 + scale_colour_manual(values = group_palette) + theme_classic()
+#ggsave(here("figures", "Interaction_Plot_HexAcid_absolute.pdf"), plot + scale_color_viridis_c(option = "plasma", begin = 0, end = 1, limits = c(3,9)), width = 10)
+```
+
+## Determin significance
+Currently, I let all four SCFAs & keto bodies run seperately through the code above, gather the slopes and then concatenate everything to p-adjust.
+The p-values for the interactions are combined into one table and p-value adjusted. For this to be ran smoothly (it's all hand-made so watch out!!!), one has to run the script above with `model_data$Group <- relevel(as.factor(model_data$Group), ref = "Ketogenic Diet")` for X_slopes, and without that addition, so `#model_data$Group <- relevel(as.factor(model_data$Group), ref = "Ketogenic Diet")`, for X_slopes_C to have the control diet as comparison. Alternatively, read in the document that was prepared that way previsouly and adjust the file name according to what you would like to check.
+```{r interaction pvalues}
+HMB_slopes <- slopes$slopes
+AA_slopes <- slopes$slopes
+Hex_slopes <- slopes$slopes
+HB_slopes <- slopes$slopes
+
+HMB_slopes_C <- slopes$slopes
+AA_slopes_C <- slopes$slopes
+Hex_slopes_C <- slopes$slopes
+HB_slopes_C <- slopes$slopes
+
+baseline_differences_SCFAs_combined <- rbind(HMB_slopes %>% select(-1) %>% mutate(Metabolite = "HMB") %>% mutate(Comparison = "Keto") %>% mutate(Interval = c("MinusSD", "MinusSD", "Mean", "Mean", "PlusSD", "PlusSD")),
+      AA_slopes %>% select(-1) %>% mutate(Metabolite = "AA") %>% mutate(Comparison = "Keto") %>% mutate(Interval = c("MinusSD", "MinusSD", "Mean", "Mean", "PlusSD", "PlusSD")),
+      Hex_slopes %>% select(-1) %>% mutate(Metabolite = "Hex") %>% mutate(Comparison = "Keto") %>% mutate(Interval = c("MinusSD", "MinusSD", "Mean", "Mean", "PlusSD", "PlusSD")),
+      HB_slopes %>% select(-1) %>% mutate(Metabolite = "HB") %>% mutate(Comparison = "Keto") %>% mutate(Interval = c("MinusSD", "MinusSD", "Mean", "Mean", "PlusSD", "PlusSD")),
+      HMB_slopes_C %>% select(-1) %>% mutate(Metabolite = "HMB") %>% mutate(Comparison = "Control") %>% mutate(Interval = c("MinusSD", "MinusSD", "Mean", "Mean", "PlusSD", "PlusSD")), 
+      AA_slopes_C %>% select(-1) %>% mutate(Metabolite = "AA") %>% mutate(Comparison = "Control") %>% mutate(Interval = c("MinusSD", "MinusSD", "Mean", "Mean", "PlusSD", "PlusSD")),
+      Hex_slopes_C %>% select(-1) %>% mutate(Metabolite = "Hex") %>% mutate(Comparison = "Control") %>% mutate(Interval = c("MinusSD", "MinusSD", "Mean", "Mean", "PlusSD", "PlusSD")),
+      HB_slopes_C %>% select(-1) %>% mutate(Metabolite = "HB") %>% mutate(Comparison = "Control") %>% mutate(Interval = c("MinusSD", "MinusSD", "Mean", "Mean", "PlusSD", "PlusSD")))
+
+#saveRDS(baseline_differences_SCFAs_combined, here("data", "baseline_differences_SCFAs_combined_logFC_diffvalues.RDS"))
+
+# Read in the previously made document
+#baseline_differences_SCFAs_combined <- readRDS(here("data", "baseline_differences_SCFAs_combined.RDS")) # To just read in the result
+
+baseline_differences_SCFAs_combined %>%
+  filter(!Coef. == "GroupKetogenic Diet") %>%
+  mutate(p.adjusted = p.adjust(p)) %>%
+  filter(p.adjusted < 0.1)
+```
+
+
+
+

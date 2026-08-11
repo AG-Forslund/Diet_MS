@@ -1,0 +1,417 @@
+---
+title: "Integrated_Analysis_NAMS"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r setup2, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source("2_DIff_diversity.R", local = knitr::knit_global())
+source("Plots.R", local = knitr::knit_global())
+source("Packages.R", local = knitr::knit_global())
+source("Functions.R", local = knitr::knit_global())
+```
+
+# Load Data
+
+## Load Raw Microbiome Data
+Set `tax.level` so the correct file is chosen and the plot is saved with that name. `tax_level2` is then correlated with `tax_level` data in this script. Also choose which `type` of analysis you want to run and which `matrix` was used which is only relevant for `type == "metabolomics"`. This will create a data frame with feature data per patient and one with tryptophan ratios if `type == "metabolomics" & matrix == "serum"`. One can choose whether raw data should be used (for example for modeling over time) or whether differences should be used and if so, which kind of metric should be used (for metabolomics data only).
+```{r Load raw microbiome data}
+tax_level <- "gmms" #choose e.g. "Species", "Phylum", "mOTUs_ID", "gmms" or "gbms"
+tax_level2 <- "Species" #choose e.g. "Species", "Phylum", "mOTUs_ID", "gmms" or "gbms"
+raw_data <- T #This is important: either one looks at both timepoints in the raw way, or one looks at calculated differences for everything. 
+difference.metric <- "subtraction" #Give "subtraction" or "percent" if case raw_data = F. Gmms only exits in raw format now.
+
+if (raw_data) {
+  if(tax_level == "gmms" | tax_level == "gbms") {
+    microbiome_data <- read_csv(here("data", paste(tax_level,"NAMS_filtered_B1_fpkm.csv", sep = "_"))) %>%
+      column_to_rownames(1)
+    microbiome_data2 <- read_csv(here("data", paste(tax_level2,"NAMS_filtered_B1.csv", sep = "_"))) %>%
+      column_to_rownames("Feature")
+  } else if (tax_level2 == "gmms" | tax_level2 == "gbms") {
+    microbiome_data <- read_csv(here("data", paste(tax_level,"NAMS_filtered_B1.csv", sep = "_"))) %>%
+      column_to_rownames("Feature")
+    microbiome_data2 <- read_csv(here("data", paste(tax_level,"NAMS_filtered_B1_fpkm.csv", sep = "_"))) %>%
+      column_to_rownames("Feature")
+  } else {
+    microbiome_data <- read_csv(here("data", paste(tax_level,"NAMS_filtered_B1.csv", sep = "_"))) %>%
+      column_to_rownames("Feature")
+  }
+} else {
+  if (difference.metric == "subtraction") {
+    file_name <- paste("NAMS_", tax_level, "_subtractionDiffs_B1.csv", sep = "")
+    file_name2 <- paste("NAMS_", tax_level2, "_subtractionDiffs_B1.csv", sep = "")
+  } else {
+    file_name <- paste("NAMS_", tax_level, "_percentDiffs_B1.csv", sep = "")
+    file_name2 <- paste("NAMS_", tax_level2, "_percentDiffs_B1.csv", sep = "")
+  }
+  
+  microbiome_diffs <- read.csv(here("data", file_name), header = TRUE)
+   microbiome_diffs2 <- read.csv(here("data", file_name2), header = TRUE)
+
+}
+```
+
+## Load interaction check results
+This loads different sets of taxa to be selected later. This can be adjusted as pleased.
+```{r Load interaction check results}
+## Load Interaction Check Results
+if (tax_level == "gmms" | tax_level == "gbms"){
+  interaction_results <- read_rds(here("data", paste(tax_level, "_InteractionCheck_fpkm_adj.RDS", sep = "")))
+  relevant_features <- interaction_results$Status %>% filter(Group == "Deconfounded") %>% pull(Feature)
+  
+} else if (tax_level == "Genus") {
+  genus_gmm_result <- readRDS(here("data", "univariate_interaction_gmms_Genus.RDS"))
+  combined_relevant_features <- genus_gmm_result$Qs %>%
+    filter(if_any(!Feature, ~. < 0.1)) %>%
+    dplyr::select(Feature, where(~ any(. < 0.1))) %>%
+    pull(Feature)
+  result_interaction_gmms_genus <- readRDS(here("data", "Genera_following_gmms_in_Group_outcomerelated.RDS"))
+  result_interaction_gmms_metabolites <- readRDS(here("data", "StoolMetabolites_following_gmms_in_Group_outcomerelated.RDS"))
+  
+  gmm_assoc_genus <- result_interaction_gmms_genus$Qs %>%
+    filter(if_any(!Feature, ~. < 0.1)) %>%
+    dplyr::select(Feature, where(~ any(. < 0.1))) %>%
+    pull(Feature)
+  
+  relevant_features <- names(result_interaction_gmms_genus$Qs %>%
+    filter(if_any(!Feature, ~. < 0.1)) %>%
+    dplyr::select(where(~ any(. < 0.1))))
+  
+  gmm_assoc_metab <- result_interaction_gmms_metabolites$Qs %>%
+    filter(if_any(!Feature, ~. < 0.1)) %>%
+    dplyr::select(Feature, where(~ any(. < 0.1))) %>%
+    pull(Feature)
+  
+  sig_metab_gmm <- names(result_interaction_gmms_metabolites$Qs %>%
+    filter(if_any(!Feature, ~. < 0.1)) %>%
+    dplyr::select(where(~ any(. < 0.1))))
+}
+
+if (tax_level == "gmms" & tax_level2 == "Genus") {
+  result_interaction_gmms_genus <- readRDS(here("data", "Genera_following_gmms_in_Group.RDS"))
+  genus_assoc_gmms <- names(result_interaction_gmms_genus$Qs %>%
+    filter(if_any(!Feature, ~. < 0.1)) %>%
+    dplyr::select(where(~ any(. < 0.1))))
+  
+  result_outcome_genus <- readRDS(here("data", "Genera_outcome_threefoldInteraction.RDS"))
+  outcome_assoc_genus <- result_outcome_genus$Qs %>%
+    filter(if_any(!Feature, ~. < 0.1)) %>%
+    dplyr::select(Feature, where(~ any(. < 0.1))) %>%
+    pull(Feature)
+} else if (tax_level == "gmms" & tax_level2 == "Species") {
+  result_outcome_species <- readRDS(here("data", "Species_outcome_threefoldInteraction.RDS"))
+  outcome_assoc_species_t4count <- result_outcome_species$Qs %>%
+    dplyr::select(Feature,mri_t2call) %>%
+    filter(if_any(!Feature, ~. < 0.1)) %>%
+    pull(Feature)
+  
+   outcome_assoc_species_t4volume <- result_outcome_species$Qs %>%
+    dplyr::select(Feature,mri_t2vall) %>%
+    filter(if_any(!Feature, ~. < 0.1)) %>%
+    pull(Feature)
+  
+  result_outcome_metabolites <- readRDS(here("data", "StoolMetabolites_outcome_threefoldInteraction.RDS"))
+  outcome_assoc_metabolites <- result_outcome_metabolites$Qs %>%
+    filter(if_any(!Feature, ~. < 0.1)) %>%
+    dplyr::select(Feature, where(~ any(. < 0.1))) %>%
+    pull(Feature)
+} else if (tax_level == "Species"){
+  outcome_assoc_species <- c("Bacteroides_thetaiotaomicron", "Roseburia_intestinalis__Roseburia_intestinalis_CAG_13_Roseburia_intestinalis", "Romboutsia_timonensis")
+}
+
+```
+
+
+## Load colors
+```{r Load colors}
+group.var <- "Group"
+
+safe_colorblind_palette <- c("#88CCEE", "#CC6677", "#DDCC77", "#117733", "#332288", "#AA4499", 
+                             "#44AA99", "#999933", "#882255", "#661100", "#6699CC", "#888888")
+
+group_palette <- c("#117733", "#661100", "#332288")
+visit_palette <- c("#882255", "#999933")
+space_palette <- c("#88CCEE", "#AA4499", "#DDCC77")
+```
+
+
+## Load Metadata
+Give variables that need to be factors in `factor.vars`. `irrelevant.vars` will deleted from the metadata in the rest of the analysis. `use.diversity` will use the metadata that includes variables about the microbial diversity. `use.nutri` will add all nutritional variables to the metadata. This will create a metadata frame with all variables per sample depending on whether one looks at the raw data (then both timepoints are included) or at differences (then both kinds of differences per meta variable are used and an extensive data set is created).
+```{r Load Metadata}
+factor.vars <- c("PatientID", "Group", "scrn_ethnicity.factor", "info_gender.factor")
+irrelevant.vars <- c("lab_bhb.v0", "lab_bhb.v3", "dropout_prot_reason", "lab_bhb")
+use.diversity <- F #should the metadata include the shannon and beta diversity?
+
+SampleIDs <- read.csv(here("data", "SampleIDs_PerProtocol_V1V3.csv"), stringsAsFactors = F) %>%
+  rename(Sample.Identification = Sample_Number) %>%
+  mutate(Group = factor(case_when(
+    Group == 1 ~ "Control",
+    Group == 2 ~ "ketogenic",
+    Group == 3 ~ "fasting",
+    TRUE ~ as.character(Group)
+  ), levels = c("Control", "ketogenic", "fasting"))) %>%
+  mutate(Visit = as.factor(Visit)) #%>%
+  #filter(!PatientID %in% c("NAMS0020", "NAMS0002")) # Patients with Valeric Acid outliers
+
+SampleIDs_V0 <- SampleIDs %>% filter(Visit == "V0") %>% pull(Tube_ID)
+SampleIDs_V3 <- SampleIDs %>% filter(Visit == "V3") %>% pull(Tube_ID)
+
+SampleIDs_keto <- SampleIDs %>% filter(Group == "ketogenic") %>% pull(Tube_ID)
+SampleIDs_control <- SampleIDs %>% filter(Group == "Control") %>% pull(Tube_ID)
+SampleIDs_fasting <- SampleIDs %>% filter(Group == "fasting") %>% pull(Tube_ID)
+
+if(raw_data) {
+  if(use.diversity) {
+    metadata <- read.csv(here("data", "NAMS_Metadata_for_analysis_long_wDiv_filtered.csv"), stringsAsFactors = T) %>%
+      dplyr::select(-X)
+  } else {
+    metadata <- read.csv(here("data", "NAMS_Metadata_for_analysis_long_filtered.csv"), stringsAsFactors = T) %>%
+      dplyr::select(-X)
+  }
+} else {
+  if(use.diversity) {
+    metadata <- read.csv(here("data", "NAMS_Metadata_for_analysis_allDiffs_wDiv_filtered.csv"), stringsAsFactors = T) %>%
+      dplyr::select(-X)
+  } else {
+    metadata <- read.csv(here("data", "NAMS_Metadata_for_analysis_allDiffs_filtered.csv"), stringsAsFactors = T) %>%
+      dplyr::select(-X)
+  }
+}
+
+metadata <- metadata %>%
+  dplyr::select(-any_of(irrelevant.vars)) %>%
+  mutate(across(all_of(factor.vars), ~ as.factor(.))) %>%
+  mutate_if(is.character, as.numeric)
+
+mdata.vars <- metadata %>%
+  distinct(PatientID, .keep_all = T) %>%
+  dplyr::select(-all_of("PatientID"))
+
+```
+
+
+## Load raw metabolomics data
+Different kinds of metabolomics data are loaded because dependent on what analysis is run below, different datasets are needed. Also, here the Kynurenine to tryptophan ratio is calculated and the respective file can be saved.
+```{r Load raw metabolomics data}
+stool_metabolomics_data <- readRDS(here("data", "NAMS_Stool_AreaNormISTD_data.RDS"))
+serum_metabolomics_data <- readRDS(here("data", "NAMS_Serum_AreaNormISTD_data.RDS"))
+metabolomics_data <- merge(stool_metabolomics_data, serum_metabolomics_data, by = "Sample.Identification", suffixes = c("_stool", "_serum"))
+
+if (raw_data) {
+  serum_metabolomics_metadata <- merge(merge(serum_metabolomics_data, SampleIDs %>% dplyr::select(PatientID, Visit, Sample.Identification), by = "Sample.Identification"), metadata %>% dplyr::select(-Sample.Identification), by = c("PatientID", "Visit")) %>% mutate(Ky_Trp_ratio = Kynurenine/tryptophan)
+  stool_metabolomics_metadata <- merge(merge(stool_metabolomics_data, SampleIDs %>% dplyr::select(PatientID, Visit, Sample.Identification), by = "Sample.Identification"), metadata %>% dplyr::select(-Sample.Identification), by = c("PatientID", "Visit"))
+
+  Ky_Trp_ratio_data <- serum_metabolomics_metadata %>%
+    group_by(PatientID) %>%
+    summarise(Ky_Trp_ratio = (Ky_Trp_ratio[Visit == "V3"] / Ky_Trp_ratio[Visit == "V0"] - 1) * 100, .groups = "drop")
+  #write_csv(Ky_Trp_ratio_data, here("data", "Ky_Trp_ratio_data.csv"))
+} else {
+  Ky_Trp_ratio_data <- read_csv(here("data", "Ky_Trp_ratio_data.csv"))
+}
+
+stool_metabolomics_data_diffs <- read_csv(here("data", "Area_NAMS_Stool_percentDiffs.csv")) %>% dplyr::select(-Group)
+serum_metabolomics_data_diffs <- read_csv(here("data", "Area_NAMS_Serum_percentDiffs.csv")) %>% dplyr::select(-Group)
+metabolomics_data_diffs <- merge(stool_metabolomics_data_diffs, serum_metabolomics_data_diffs, by = "PatientID", suffixes = c("_stool", "_serum"))
+  
+serum_metabolomics_metadata_diffs <- merge(merge(serum_metabolomics_data_diffs, metadata, by = "PatientID"), Ky_Trp_ratio_data, by = "PatientID")
+stool_metabolomics_metadata_diffs <- merge(stool_metabolomics_data_diffs, metadata, by = "PatientID")
+
+```
+
+
+# Correlate Microbiome and Metabolome
+
+## Interaction model
+
+### Prepare interaction data
+Adjust the final data file in the code chunk.
+```{r Prep interaction}
+matrix <- "stool" #can be stool, serum or both
+space <- "same" #can be same or diff. If same, then gmms and taxa are correlated
+
+if(space == "diff") {
+  if(matrix == "stool") {
+    feature_int <- stool_metabolomics_data
+  } else if (matrix == "serum") {
+    feature_int <- serum_metabolomics_data
+  } else if (matrix == "both") {
+    feature_int <- metabolomics_data
+  }
+  
+  feature_int <- feature_int %>%
+    mutate(Sample.Identification = paste("S", Sample.Identification, sep = "")) %>%
+    rename(Tube_ID = Sample.Identification) %>%
+    dplyr::select(-starts_with("Batch"), -starts_with("Sample.Type")) %>%
+    merge(., SampleIDs %>% dplyr::select(-Sample.Identification), by = "Tube_ID") %>%
+    rename(Status = Visit) %>%
+    column_to_rownames("Tube_ID")
+} else if (space == "same") {
+  feature_int <- data.frame(t(microbiome_data2)) %>%
+    rownames_to_column("Tube_ID") %>%
+    merge(., SampleIDs %>% dplyr::select(-Sample.Identification), by = "Tube_ID") %>%
+    rename(Status = Visit) %>%
+    column_to_rownames("Tube_ID")
+}
+
+microbiome_int <- data.frame(t(microbiome_data)) %>%
+  rownames_to_column("Tube_ID") %>%
+  merge(., SampleIDs %>% dplyr::select(-Sample.Identification), by = "Tube_ID") %>%
+  merge(., metadata %>% rename(Tube_ID = Sample.Identification) %>% dplyr::select(Tube_ID, mri_t2call, mri_t2vall), by = "Tube_ID") %>%
+  rename(Status = Visit) %>%
+  column_to_rownames("Tube_ID")
+
+feature_int <- feature_int %>% slice(match(rownames(microbiome_int), rownames(.))) #%>%
+  #dplyr::select(Acetic_acid, Propanoic_acid, Butyric_acid, Group, PatientID, Status)
+  #dplyr::select(tryptophan, Kynurenine, Group, PatientID, Status)
+
+microbiome_int <- microbiome_int %>%
+  dplyr::select(all_of(relevant_features), mri_t2vall, PatientID, Status, Group) %>%
+  #dplyr::select(all_of(outcome_assoc_species), Group, PatientID, Status) %>%
+  slice(match(rownames(feature_int), rownames(.)))
+```
+
+
+### Check interactions between omics spaces after multivariate analysis
+The features are rank- or log-transformed and their change over time is tested for association with the change over time per group of the other omics space. Does the relationship between a metabolite and a microbial feature differ over time depending on the group? Depending on, which data is used in `features_data`, adjust `feature_type`. 
+```{r Interactions after multivariate analysis}
+features_data <- microbiome_int
+covariates_data <- feature_int
+feature_type <- "microbiome"
+
+result_multivariate_interaction <- interaction_deconf_both(features_data, covariates_data, p_adj_method = "fdr", feature_type = feature_type, univariate = F)
+
+#saveRDS(result, here("data", paste("Metab", paste(tax_level, matrix, sep="_"), "_Interaction_KetoFasting.RDS", sep = "")))
+
+result_multivariate_interaction$Qs %>%
+  filter(if_any(!Feature, ~. < 0.1)) %>%
+  dplyr::select(Feature, where(~ any(. < 0.1)))
+```
+
+
+### Check interactions between omics spaces after univariate analysis
+Is the change in one taxon associated with the change in a metabolite (or vice versa) while accounting for the group. This is similar to a post hoc test: we are testing whether anything group related is associated with something else group-related. Depending on which data is used in `features_data`, adjust `feature_type`. One might need to adjust `p_adj_method` in the `interaction_deconf_both` function. When taxa or metabolites are used as "covariates", the results are adjusted over these tests via fdr correction. If the result should be saved, this needs to be adjusted in the code chunk. Also, a plot is produced depicting the result.
+```{r Interactions after univariate analysis}
+features_data <- feature_int
+covariates_data <- microbiome_int
+feature_type <- "microbiome"
+
+result_univariate_interaction <- interaction_deconf_both(features_data, covariates_data, p_adj_method = "none", feature_type = feature_type, univariate = T)
+
+## Only relevant when adjusting over taxa or metabolites which are used as covariates
+result_univariate_interaction$Qs <- data.frame(result_univariate_interaction$Ps) %>%
+  gather(Genus, P, -Feature) %>%
+  mutate(across(P, ~ p.adjust(., method = "fdr"))) %>%
+  spread(Genus, P)
+
+#saveRDS(result_univariate_interaction, here("data", "for_paper", "univariate_interaction_serumMetabolites_PPIISpecies.RDS"))
+
+result_univariate_interaction$Qs  %>%
+  filter(if_any(!Feature, ~. < 0.1)) %>%
+  dplyr::select(Feature, where(~ any(. < 0.1)))
+
+merge(data.frame(result_univariate_interaction$Ps), data.frame(result_univariate_interaction$Ds), by = "Feature") %>%
+    rename(P = propionate.production.II.x, D = propionate.production.II.y) %>%
+    mutate(Name = "propionate.production.II") %>%
+    ggplot(aes(x = Feature, y = Name, fill = D, size = -log10(P))) +
+    geom_point(shape = 21, alpha = 0.7 ) +
+    scale_size_continuous(range = c(5, 25), name = "P-value") +
+    #scale_fill_viridis(option = "rainbow", begin = 0.1, name = "EffectSize", limits = c(-0.1, 0.1)) +
+    scale_fill_distiller(palette = "PRGn", name = "Partial\nR2", limits = c(-0.2, 0.2)) +
+    theme_classic() +
+    theme(axis.text.x = element_text(size = 8, angle = 45, hjust = 1),
+          axis.text.y = element_text(size = 8, angle = 0, hjust = 1, vjust = 0)) 
+#ggsave(here("figures", "univariate_outcomeGMMAssocSpecies_SCFAs.pdf"), width = 10)
+```
+
+
+
+### Check whether metabolites follow the trajectory of group associated gmms via a three-way interaction
+The covariate is y here. Depending on which data is used in `features_data` and `covariates_data`, adjust `feature_type` and `cov_type`, respectively. One can also choose the reference group in `reference_level`. 
+```{r three way metabolite/gmm analysis}
+features_data <- feature_int %>% dplyr::select(-c(Group, Status, PatientID))
+covariates_data <- microbiome_int
+p_adj_method <- "none" #this one needs adjustment over the metabolites which are used as "covariates" here (although they are calculated as outcomes) so the adjustment needs to be done manually
+reference_level = "ketogenic"
+feature_type = "microbiome"
+cov_type = "microbiome" #if metabolomics, then write "metabolomics", otherwise it doesn't matter because nothing happens
+
+result_threeway <- interaction_outcome_assoc(features_data, covariates_data, p_adj_method, feature_type = feature_type, cov_type = cov_type, reference_level = reference_level)
+
+result_threeway$Qs <- data.frame(result_threeway$Ps) %>%
+  gather(Genus, P, -Feature) %>%
+  mutate(across(P, ~ p.adjust(., method = "fdr"))) %>%
+  spread(Genus, P)
+
+#saveRDS(result_threeway, here("data", "LesionAssocSpecies_following_gmms_in_Group.RDS"))
+
+result_threeway$Qs %>%
+  filter(if_any(!Feature, ~. < 0.1)) %>%
+  dplyr::select(Feature, where(~ any(. < 0.1)))
+
+future_assoc_bars(result_threeway, bar.plot = F)
+#ggsave(here("figures", "Species_connected_to_GMMs_and_lesioncount_V1.pdf"), width = 14)
+```
+
+
+### Check mediation between intervention and gmms through stool metabolome
+Tests whether metabolite levels mediate the effect of Group on gut microbial modules, while accounting for time and patient-level variability. Effect size is calculated as the absolute value of the average causal mediation effect (ACME) divided by the sum of the absolute values of the ACME and the average direct effect (ADE). Features are the potential mediators here, the covariates are the "goal". Group → Species → GMM: Species is feature, GMM is covariate. Group → GMM → Outcome: GMM is feature, covariate is Outcome. Depending on, which data is used in `features_data`, adjust `feature_type` and choose the reference group in `reference_level`. 
+```{r Mediation analysis}
+features_data <- microbiome_int %>% dplyr::select(propionate.production.II,c("PatientID", "Group", "Status"))
+covariates_data <- microbiome_int %>% dplyr::select(mri_t2vall,c("PatientID", "Group", "Status"))
+merged_dfs <- merge(feature_int, microbiome_int, by = c("PatientID", "Group", "Status"))
+reference_level = "ketogenic"
+feature_type = "microbiome"
+set.seed(2210)
+
+result_mediation <- mediation_analysis(features_data, covariates_data, p_adj_method = "fdr", feature_type = feature_type, reference_level = reference_level)
+#saveRDS(result_mediation, here("data", "for_paper", "Mediation_Group_Gmms_serumMetab.RDS"))
+
+
+model.m <- lmer(log(tryptophan) ~ Status * Group + rank(propionate.production.II) + (1|PatientID), data = merged_dfs %>% drop_na(mri_t2vall) %>% filter(Group %in% c("ketogenic", "Control")), REML = F)
+model.y <- lmer(mri_t2vall ~ log(tryptophan) + rank(propionate.production.II) + Status * Group + (1|PatientID), data = merged_dfs %>% drop_na(mri_t2vall) %>% filter(Group %in% c("ketogenic", "Control")), REML = F)
+mediation_result <- mediate(model.m , model.y, treat = "propionate.production.II", mediator = "log(tryptophan)", time = "Time")
+summary(mediation_result)
+
+
+model.m <- lmer(rank(propionate.production.II) ~ Status * Group + (1|PatientID), data = merged_dfs %>% drop_na(mri_t2vall) %>% filter(Group %in% c("fasting", "ketogenic")), REML = F)
+model.y <- lmer(mri_t2vall ~ rank(propionate.production.II) + Status * Group + (1|PatientID), data = merged_dfs %>% drop_na(mri_t2vall) %>% filter(Group %in% c("fasting", "ketogenic")), REML = F)
+mediation_result <- mediate(model.m , model.y, treat = "Group", mediator = "rank(propionate.production.II)")
+summary(mediation_result)
+```
+
+
+### Plot interaction effect sizes
+The interactions are plotted and one can choose which dataset should be used for the plot in `results_all`. A file with only significant features, `results_filtered`, is created that can be used for the plot. However, it might not be applicable, in which case, `results_all` should be used. One can choose to filter the results so only significant results with q below `sig_theshold` are depicted in `filter_results`. 
+```{r Plot interactions}
+filter_results = F
+sig_threshold <- 0.1
+#results_all <- readRDS(here("data", paste("Metab", paste(tax_level, matrix, sep="_"), "_Interaction.RDS", sep = "")))
+#results_all <- readRDS(here("data", paste("UnivariateMetab", paste(tax_level, matrix, sep="_"), "_Interaction.RDS", sep = "")))
+results_all <- result_univariate_interaction
+#limits = c(0, max(apply(results_all$Ds %>% select(-Feature), 2, max, na.rm = TRUE)) + 0.01)
+  
+if (filter_results) {
+  results_all_filtered <- results_all$Qs %>%
+    filter(if_any(!Feature, ~. < sig_threshold)) %>%
+    dplyr::select(Feature, where(~ any(. < sig_threshold)))
+  
+  sig.features.results_all <- results_all_filtered %>%
+    pull(Feature)
+  
+  sig.taxa.results_all <- names(results_all_filtered)
+  
+  results_data_plot <- lapply(results_all, function(x) {x <- x %>% filter(Feature %in% sig.features.results_all) %>% dplyr::select(all_of(sig.taxa.results_all))})
+} else {
+  results_data_plot <- results_all
+}
+
+interaction_pPlot <- interaction_heatmap3(results_data_plot, filter = T, limits = c(-0.2,0.2), triangle_size = 8, star_size = 5)
+
+interaction_pPlot
+
+#ggsave(here("figures", "Bifido_serumMetabs_univariateCor.pdf"), interaction_pPlot, width =14, height = 7)
+```
