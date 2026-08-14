@@ -71,8 +71,7 @@ if(type == "metabolomics") {
         rename_with(~paste0(., "_Diff"), .cols = where(is.numeric))
     } else {
       metabolomics_diffs <- read.csv(here("data", "Area_NAMS_Serum_percentDiffs.csv"), header = TRUE) %>%
-        rename_with(~paste0(., "_Diff"), .cols = where(is.numeric)) %>%
-        mutate(across(all_of(grep("_Diff", names(metabolomics_diffs), value = TRUE)), ~ log(1 + .x / 100)))
+        rename_with(~paste0(., "_Diff"), .cols = where(is.numeric))
     }
     metabolomics_data_raw <- readRDS(here("data", "NAMS_Serum_AreaNormISTD_data.RDS"))
   }
@@ -125,25 +124,50 @@ if(type == "metabolomics") {
 group_palette <- c("#117733", "#661100", "#332288")
 ```
 
-# Simple baseline group association
+# Simple baseline group and DMT association
 Are baseline values of these features sig. different between diet groups? This just does a simple Kruskal-Wallis test for all features in the loaded biological data and adjusts the p-value.
 ```{r basline group association}
+DMT_yn <- read_csv(here("data", "MS_meds_clean.csv")) %>%
+  mutate(DMT_yn = ifelse(No_DMT, "No", "Yes")) %>%
+  dplyr::select(PatientID, DMT_yn, No_DMT)
+
 analysis_data <- bio_data %>%
+  merge(., DMT_yn, by = "PatientID") %>%
   column_to_rownames("PatientID") %>%
-  select(contains(c("_Base")), Group)
+  select(Group, DMT_yn,contains(c("_Base"))) 
 
-numeric_cols <- names(analysis_data)[sapply(analysis_data, is.numeric)]
+wilcox_results <- analysis_data %>%
+  pivot_longer(cols = ends_with("_Base"), names_to = "Metabolite", values_to = "AUC") %>%
+  group_by(Metabolite) %>%
+  wilcox_test(AUC ~ DMT_yn) %>%
+  mutate(p.adj = round(p.adjust(p, "fdr"), 3)) %>%
+  dplyr::select(Metabolite, p, p.adj)
 
-# Calculate eta squared for each feature
-p_values <- sapply(numeric_cols, function(col) {
-  formula <- as.formula(paste(col, "~ Group"))
-  kruskal.test(formula, data = analysis_data)$p.value
-})
+cliffs_results <- analysis_data %>%
+  pivot_longer(cols = ends_with("_Base"), names_to = "Metabolite", values_to = "AUC") %>%
+  group_by(Metabolite) %>%
+  group_modify(~ {
+    res <- effsize::cliff.delta(AUC ~ DMT_yn, data = .x)
+    tibble(effsize = as.numeric(res$estimate))
+  }) %>%
+  mutate(effsize = round(effsize,3))
 
-q_values <- p.adjust(p_values, method = "fdr")
+median_iqr <- analysis_data %>%
+  pivot_longer(cols = ends_with("_Base"), names_to = "Metabolite", values_to = "AUC") %>%
+  group_by(Metabolite, DMT_yn) %>%
+  get_summary_stats(AUC, type = "median_iqr") %>%
+  mutate(median_iqr = paste0(round(median, 1), " (", round(iqr, 1), ")")) %>%
+  select(Metabolite, DMT_yn, median_iqr) %>%
+  pivot_wider(names_from = DMT_yn, values_from = median_iqr,
+              names_prefix = "DMT_")
 
-p_values
-q_values
+# Merge into one final table
+final_table <- wilcox_results %>%
+  left_join(median_iqr, by = "Metabolite") %>%
+  left_join(cliffs_results, by = "Metabolite") %>%
+  mutate(Metabolite = str_remove(Metabolite, "_Base$"))
+
+final_table
 ```
 
 #Interaction check
@@ -251,18 +275,46 @@ if(analysis_type == "outcomes") {
 
 model_form <- as.formula(paste0(var_diff, "~", var_base, "*Group"))
 fiti <- glm(model_form, data = model_data)
-slopes <- sim_slopes(fiti, pred = Group, modx = !!sym(var_base))
+slopes <- sim_slopes(fiti, pred = Group, modx = !!sym(var_base), confint = T, ci.width = 0.95)
+
+###
+#Alternatively for -1 SD
+emm_minus1sd <- emmeans(fiti, specs = "Group", at = setNames(list(mean(model_data[[var_base]], na.rm = TRUE) - sd(model_data[[var_base]], na.rm = TRUE)), var_base))
+contrasts_minus1sd <- pairs(emm_minus1sd, adjust = "none")
+slopes_minus1sd <- as.data.frame(summary(contrasts_minus1sd, infer = c(TRUE, TRUE)))
+# or for mean values
+emm_mean <- emmeans(fiti, specs = "Group", at = setNames(list(mean(model_data[[var_base]], na.rm = TRUE)), var_base))
+contrasts_mean <- pairs(emm_mean, adjust = "none")
+slopes_mean <- as.data.frame(summary(contrasts_mean, infer = c(TRUE, TRUE)))
+# or for mean values
+emm_plus1sd <- emmeans(fiti, specs = "Group", at = setNames(list(mean(model_data[[var_base]], na.rm = TRUE) + sd(model_data[[var_base]], na.rm = TRUE)), var_base))
+contrasts_plus1sd <- pairs(emm_plus1sd, adjust = "none")
+slopes_plus1sd <- as.data.frame(summary(contrasts_plus1sd, infer = c(TRUE, TRUE)))
+
+slopes <- rbind(rbind(slopes_minus1sd, slopes_mean), slopes_plus1sd) %>%
+  mutate(p.adjusted = p.adjust(p.value, "BH"))
+
+combined_contrasts <- rbind(
+  contrasts_minus1sd,
+  contrasts_mean,
+  contrasts_plus1sd,
+  adjust = "mvt"
+)
+
+slopes_mvt <- summary(combined_contrasts, infer = c(TRUE, TRUE))
+###
 
 plot <- interact_plot(fiti, pred = Group, modx = !!sym(var_base), plot.points = TRUE, point.size = 5, point.alpha = 0.4, line.thickness = 3)
 plot2 <- interact_plot(fiti, pred = !!sym(var_base), modx = Group, plot.points = TRUE)
 
-#slopes
+slopes
 #cat_plot(fiti, pred = Group, modx = !!sym(var_base), plot.points = TRUE, point.size = 5, point.alpha = 0.4, line.thickness = 3)
 
 plot + scale_color_viridis_c(option = "plasma", begin = 0, end = 1, limits = c(3,9)) + theme_classic()
 #plot2 + scale_colour_manual(values = group_palette) + theme_classic()
 #ggsave(here("figures", "Interaction_Plot_HexAcid_absolute.pdf"), plot + scale_color_viridis_c(option = "plasma", begin = 0, end = 1, limits = c(3,9)), width = 10)
 ```
+
 
 ## Determin significance
 Currently, I let all four SCFAs & keto bodies run seperately through the code above, gather the slopes and then concatenate everything to p-adjust.
@@ -290,7 +342,7 @@ baseline_differences_SCFAs_combined <- rbind(HMB_slopes %>% select(-1) %>% mutat
 #saveRDS(baseline_differences_SCFAs_combined, here("data", "baseline_differences_SCFAs_combined_logFC_diffvalues.RDS"))
 
 # Read in the previously made document
-#baseline_differences_SCFAs_combined <- readRDS(here("data", "baseline_differences_SCFAs_combined.RDS")) # To just read in the result
+baseline_differences_SCFAs_combined <- readRDS(here("data", "baseline_differences_SCFAs_combined_percent_diffvalues.RDS")) # To just read in the result
 
 baseline_differences_SCFAs_combined %>%
   filter(!Coef. == "GroupKetogenic Diet") %>%
