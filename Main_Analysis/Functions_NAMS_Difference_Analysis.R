@@ -31,6 +31,15 @@ feature_association <- function(feature_data, covariate_data, covariate_name, ty
     f_squared = 0
   }
   
+  if(covariate_name == "Group") {
+    data_general$Group <- relevel(as.factor(data_general$Group), ref = "ketogenic diet")
+    posthoc_model <- glm(Feature ~ Group*Base, data = data_general)
+    slopes <- emtrends(posthoc_model, specs = "Group", var = "Base")
+    pairwise_contrasts <- pairs(slopes)
+    print(summary(pairwise_contrasts, infer = c(TRUE, TRUE)))
+  }
+  
+  
   #Summarize results
   result_list <- list(pValue = general_test$"Pr(>F)"[2], EffSize = f_squared)
   
