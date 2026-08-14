@@ -313,13 +313,17 @@ feature_posthoc_tests <- function(feature, countdata, outcome = F, outcome_name 
   # Extract p-values
   p_values <- s$p.value
   estimates <- data.frame(eff_size(comparisons, sigma = sigma(lmer_model), edf = df.residual(lmer_model), method = "identity"))$effect.size
+  diff_in_change_ci <- confint(comparisons, level = 0.95)
   
   # Create a dataframe with feature name and p-values
   result <- data.frame(
     Feature = feature,
     Comparison = data.frame(s)$contrast,
     P_Value = p_values,
-    Estimate = estimates
+    EffectSize = estimates,
+    CI = round(diff_in_change_ci$estimate, 2),
+    CI.lower.CL = round(diff_in_change_ci$"lower.CL", 2),
+    CI.upper.CL = round(diff_in_change_ci$"upper.CL", 2)
   )
   
   return(result)
