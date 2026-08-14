@@ -452,14 +452,14 @@ Interaction_posthoc_plot <- function(result_list, type = NULL) {
     #gather(Feature, q_Value, -Comparison) %>%
     filter(P_Value < 0.1) %>%
     mutate(Comparison = as.factor(Comparison)) %>%
-    mutate(Estimate_direction = factor(ifelse(Estimate > 0, "positive", "negative"))) %>%
+    mutate(Estimate_direction = factor(ifelse(EffectSize > 0, "positive", "negative"))) %>%
     #ggplot(aes(x = Feature, y = Comparison, fill = P_Value, size = -log10(P_Value), shape = Estimate_direction)) +
-    ggplot(aes(x = Feature, y = Comparison, fill = P_Value, size = abs(Estimate), shape = Estimate_direction)) +
+    ggplot(aes(x = Feature, y = Comparison, fill = P_Value, size = abs(EffectSize), shape = Estimate_direction)) +
     #geom_point(shape = 21, alpha = 0.7 ) +
     geom_point() +
     scale_shape_manual(values = c("positive" = 24, "negative" = 25)) +
     #scale_size_continuous(range = c(5, 15), name = "P-value") +
-    scale_size_continuous(range = c(5, 15), name = "abs(Estimate)") +
+    scale_size_continuous(range = c(5, 15), name = "abs(EffectSize)") +
     scale_fill_viridis(option = "mako", begin = 1, end = 0, name = "q-Value") +
     theme_classic() +
     theme(axis.text.x = element_text(size = 8, angle = 45, hjust = 1),
